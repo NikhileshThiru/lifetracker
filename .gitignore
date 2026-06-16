@@ -18,3 +18,6 @@ xcuserdata/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+# XcodeGen output (project.yml is the source of truth — regenerate with `xcodegen generate`)
+*.xcodeproj
