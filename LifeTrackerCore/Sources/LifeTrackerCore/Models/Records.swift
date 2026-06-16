@@ -71,6 +71,31 @@ public struct Event: Identifiable, Equatable, LTRecord {
     public var createdAt: Int64
     public var updatedAt: Int64
     public var deletedAt: Int64?
+
+    public init(
+        id: String, userId: String?, categoryId: String?, title: String?, notes: String?,
+        startAt: Int64?, endAt: Int64?, state: String, sequenceHint: Int?, confidence: Double,
+        source: String, sourceRef: String?, originCheckInId: String?, isPinned: Bool,
+        createdAt: Int64, updatedAt: Int64, deletedAt: Int64?
+    ) {
+        self.id = id
+        self.userId = userId
+        self.categoryId = categoryId
+        self.title = title
+        self.notes = notes
+        self.startAt = startAt
+        self.endAt = endAt
+        self.state = state
+        self.sequenceHint = sequenceHint
+        self.confidence = confidence
+        self.source = source
+        self.sourceRef = sourceRef
+        self.originCheckInId = originCheckInId
+        self.isPinned = isPinned
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.deletedAt = deletedAt
+    }
 }
 
 public struct EventRevision: Identifiable, Equatable, LTRecord {

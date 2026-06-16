@@ -6,11 +6,12 @@ public enum GapKind: Sendable, Equatable {
 }
 
 /// A computed (never stored) span of unlogged time within a day.
-public struct Gap: Sendable, Equatable {
+public struct Gap: Sendable, Equatable, Identifiable {
     public let startAt: Int64
     public let endAt: Int64
     public let kind: GapKind
     public var minutes: Int { Int((endAt - startAt) / 60_000) }
+    public var id: String { "\(startAt)-\(endAt)" }
 }
 
 /// Computes gaps as the complement of confirmed events across a local day.
