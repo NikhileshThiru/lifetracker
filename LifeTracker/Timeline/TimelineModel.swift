@@ -30,9 +30,7 @@ final class TimelineModel {
 
     var isEmpty: Bool { items.isEmpty && laterPlanned.isEmpty }
 
-    func load(database: AppDatabase, now: Int64, tz: TimeZone) {
-        let day = LocalDay(containing: Clock.date(fromMillis: now), in: tz)
-
+    func load(database: AppDatabase, day: LocalDay, now: Int64, tz: TimeZone) {
         var catMap: [String: LifeTrackerCore.Category] = [:]
         for c in (try? CategoryRepository(database.dbWriter).live()) ?? [] { catMap[c.id] = c }
 
@@ -50,6 +48,6 @@ final class TimelineModel {
             .filter { $0.startAt == nil }
             .map { ($0, $0.categoryId.flatMap { catMap[$0] }) }
 
-        title = TimeFormat.dayTitle(now, tz: tz)
+        title = TimeFormat.dayTitle(day.bounds(in: tz).startMs, tz: tz)
     }
 }

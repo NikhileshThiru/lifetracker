@@ -1,58 +1,55 @@
 import SwiftUI
 import LifeTrackerCore
 
-struct TodayView: View {
+/// Renders one day's timeline (confirmed/planned/gaps) with add/edit/fill.
+/// Reused for the Today tab and for any day drilled into from the calendar.
+/// Expects to be embedded in a NavigationStack provided by its container.
+struct TimelineContent: View {
     @Environment(AppEnvironment.self) private var env
-    @State private var model = TimelineModel()
+    let day: LocalDay
+    let navTitle: String?
 
+    @State private var model = TimelineModel()
     @State private var showAdd = false
     @State private var editingEvent: Event?
     @State private var fillGap: Gap?
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                if model.isEmpty {
-                    EmptyDayView().padding(.top, 100)
-                } else {
-                    LazyVStack(spacing: Theme.rowSpacing) {
-                        ForEach(model.items) { item in
-                            TimelineRowView(item: item, tz: env.timeZone)
-                                .contentShape(Rectangle())
-                                .onTapGesture { tap(item) }
-                        }
-                        if !model.laterPlanned.isEmpty {
-                            LaterSection(items: model.laterPlanned) { editingEvent = $0 }
-                        }
+        ScrollView {
+            if model.isEmpty {
+                EmptyDayView().padding(.top, 100)
+            } else {
+                LazyVStack(spacing: Theme.rowSpacing) {
+                    ForEach(model.items) { item in
+                        TimelineRowView(item: item, tz: env.timeZone)
+                            .contentShape(Rectangle())
+                            .onTapGesture { tap(item) }
                     }
-                    .padding(.horizontal, Theme.hPadding)
-                    .padding(.vertical, 14)
+                    if !model.laterPlanned.isEmpty {
+                        LaterSection(items: model.laterPlanned) { editingEvent = $0 }
+                    }
                 }
+                .padding(.horizontal, Theme.hPadding)
+                .padding(.vertical, 14)
             }
-            .background(Theme.bg)
-            .navigationTitle(model.title)
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button { showAdd = true } label: { Image(systemName: "plus") }
-                }
+        }
+        .background(Theme.bg)
+        .navigationTitle(navTitle ?? model.title)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { showAdd = true } label: { Image(systemName: "plus") }
             }
         }
         .sheet(isPresented: $showAdd) {
-            AddActivitySheet(initialStart: nil, initialEnd: nil) { reload() }
-                .environment(env)
+            AddActivitySheet(initialStart: nil, initialEnd: nil) { reload() }.environment(env)
         }
         .sheet(item: $editingEvent) { event in
-            EditEventSheet(event: event) { reload() }
-                .environment(env)
+            EditEventSheet(event: event) { reload() }.environment(env)
         }
         .sheet(item: $fillGap) { gap in
-            AddActivitySheet(initialStart: gap.startAt, initialEnd: gap.endAt) { reload() }
-                .environment(env)
+            AddActivitySheet(initialStart: gap.startAt, initialEnd: gap.endAt) { reload() }.environment(env)
         }
-        .task {
-            reload()
-            autoPresentForScreenshots()
-        }
+        .task { reload(); autoPresentForScreenshots() }
     }
 
     private func tap(_ item: TimelineItem) {
@@ -63,21 +60,21 @@ struct TodayView: View {
     }
 
     private func reload() {
-        model.load(database: env.database, now: env.currentTime(), tz: env.timeZone)
+        model.load(database: env.database, day: day, now: env.currentTime(), tz: env.timeZone)
     }
 
-    /// Dev hook: auto-open a sheet so it can be screenshotted headlessly.
     private func autoPresentForScreenshots() {
         let args = ProcessInfo.processInfo.arguments
         if args.contains("-presentAdd") { showAdd = true }
         if args.contains("-presentEdit"),
-           case let .event(e, _)? = model.items.first(where: { if case .event = $0 { return true } else { return false } }) {
+           let first = model.items.first(where: { if case .event = $0 { return true } else { return false } }),
+           case let .event(e, _) = first {
             editingEvent = e
         }
     }
 }
 
-private struct EmptyDayView: View {
+struct EmptyDayView: View {
     var body: some View {
         VStack(spacing: 12) {
             Image(systemName: "mic.circle")
@@ -96,7 +93,7 @@ private struct EmptyDayView: View {
     }
 }
 
-private struct LaterSection: View {
+struct LaterSection: View {
     let items: [(event: Event, category: LifeTrackerCore.Category?)]
     var onTap: (Event) -> Void
 

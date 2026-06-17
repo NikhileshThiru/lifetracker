@@ -164,6 +164,18 @@ public struct EventRepository {
         }
     }
 
+    /// Confirmed, non-deleted events whose start falls in `[range.lowerBound, range.upperBound)`.
+    public func confirmed(in range: Range<Int64>, userId: String? = nil) throws -> [Event] {
+        try dbWriter.read { db in
+            try Self.liveEvents(userId: userId)
+                .filter(Column("state") == EventState.confirmed.rawValue)
+                .filter(Column("start_at") != nil)
+                .filter(Column("start_at") >= range.lowerBound && Column("start_at") < range.upperBound)
+                .order(Column("start_at"))
+                .fetchAll(db)
+        }
+    }
+
     private static func liveEvents(userId: String?) -> QueryInterfaceRequest<Event> {
         var req = Event.filter(Column("deleted_at") == nil)
         if let userId {

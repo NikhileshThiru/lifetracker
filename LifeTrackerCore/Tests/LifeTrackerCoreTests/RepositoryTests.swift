@@ -110,6 +110,18 @@ struct RepositoryTests {
         #expect(count == 1)
     }
 
+    @Test func confirmedInRangeFiltersByStartAndState() throws {
+        let (_, events, _, _) = try fixture()
+        let now = Clock.nowMillis()
+        let inRange = makeEvent(start: 1000, end: 2000, state: .confirmed, now: now)
+        let outOfRange = makeEvent(start: 5000, end: 6000, state: .confirmed, now: now)
+        let plannedInRange = makeEvent(start: 1500, end: 1800, state: .planned, now: now)
+        for e in [inRange, outOfRange, plannedInRange] { try events.insert(e) }
+
+        let ids = try events.confirmed(in: 0..<3000, userId: "u1").map(\.id)
+        #expect(ids == [inRange.id]) // out-of-range and planned excluded
+    }
+
     @Test func setParseStatusUpdates() throws {
         let (_, _, _, checkIns) = try fixture()
         let now = Clock.nowMillis()

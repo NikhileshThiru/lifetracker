@@ -6,7 +6,7 @@ struct LifeTrackerApp: App {
 
     var body: some Scene {
         WindowGroup {
-            TodayView()
+            RootView()
                 .environment(env)
                 .preferredColorScheme(.dark)
         }

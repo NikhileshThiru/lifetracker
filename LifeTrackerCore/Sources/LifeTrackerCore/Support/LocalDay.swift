@@ -2,10 +2,12 @@ import Foundation
 
 /// A calendar day in a specific timezone. Used to window events into local days.
 /// Bounds are computed with `Calendar`, so DST-shortened/-lengthened days are correct.
-public struct LocalDay: Equatable, Sendable {
+public struct LocalDay: Equatable, Hashable, Sendable, Identifiable {
     public let year: Int
     public let month: Int
     public let day: Int
+
+    public var id: String { "\(year)-\(month)-\(day)" }
 
     public init(year: Int, month: Int, day: Int) {
         self.year = year
