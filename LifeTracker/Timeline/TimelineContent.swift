@@ -13,6 +13,7 @@ struct TimelineContent: View {
     @State private var showAdd = false
     @State private var editingEvent: Event?
     @State private var fillGap: Gap?
+    @State private var launcher = CaptureLauncher.shared
 
     var body: some View {
         ScrollView {
@@ -20,6 +21,15 @@ struct TimelineContent: View {
                 EmptyDayView().padding(.top, 100)
             } else {
                 LazyVStack(spacing: Theme.rowSpacing) {
+                    if let summary = model.summaryLine {
+                        HStack {
+                            Text(summary)
+                                .font(.subheadline)
+                                .foregroundStyle(Theme.textSecondary)
+                            Spacer()
+                        }
+                        .padding(.bottom, 2)
+                    }
                     ForEach(model.items) { item in
                         TimelineRowView(item: item, tz: env.timeZone)
                             .contentShape(Rectangle())
@@ -36,10 +46,16 @@ struct TimelineContent: View {
         .background(Theme.bg)
         .navigationTitle(navTitle ?? model.title)
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button { launcher.present = true } label: { Image(systemName: "mic.fill") }
+                    .accessibilityLabel("Voice check-in")
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button { showAdd = true } label: { Image(systemName: "plus") }
+                    .accessibilityLabel("Add activity")
             }
         }
+        .onChange(of: launcher.changeToken) { _, _ in reload() }
         .sheet(isPresented: $showAdd) {
             AddActivitySheet(initialStart: nil, initialEnd: nil) { reload() }.environment(env)
         }
@@ -56,6 +72,7 @@ struct TimelineContent: View {
         switch item {
         case .event(let e, _): editingEvent = e
         case .gap(let g): fillGap = g
+        case .nowMarker: break
         }
     }
 

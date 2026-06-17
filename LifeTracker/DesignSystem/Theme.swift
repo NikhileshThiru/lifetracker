@@ -10,6 +10,7 @@ enum Theme {
     static let hairline = Color.white.opacity(0.10)
     static let textPrimary = Color.white
     static let textSecondary = Color.white.opacity(0.55)
+    static let now = Color(red: 1.0, green: 0.45, blue: 0.45)
 
     static let corner: CGFloat = 14
     static let rowSpacing: CGFloat = 12

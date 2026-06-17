@@ -30,3 +30,5 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"          # iPhone only
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Used to record your spoken check-ins, transcribed on device."
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: "Used to transcribe your spoken check-ins on device."

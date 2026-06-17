@@ -50,6 +50,25 @@ public struct CheckIn: Identifiable, Equatable, LTRecord {
     public var createdAt: Int64
     public var updatedAt: Int64
     public var deletedAt: Int64?
+
+    public init(
+        id: String, userId: String?, occurredAt: Int64, timezone: String, rawTranscript: String,
+        audioPath: String?, sttEngine: String, inputMethod: String, parseStatus: String,
+        createdAt: Int64, updatedAt: Int64, deletedAt: Int64?
+    ) {
+        self.id = id
+        self.userId = userId
+        self.occurredAt = occurredAt
+        self.timezone = timezone
+        self.rawTranscript = rawTranscript
+        self.audioPath = audioPath
+        self.sttEngine = sttEngine
+        self.inputMethod = inputMethod
+        self.parseStatus = parseStatus
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.deletedAt = deletedAt
+    }
 }
 
 public struct Event: Identifiable, Equatable, LTRecord {

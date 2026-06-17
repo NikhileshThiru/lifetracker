@@ -29,4 +29,12 @@ public final class AppDatabase {
         let queue = try DatabaseQueue(path: path, configuration: config)
         return try AppDatabase(queue)
     }
+
+    /// Writes a consistent single-file copy of the database to `url` (for export/backup).
+    /// Uses `VACUUM INTO`, so the copy is clean regardless of journal mode.
+    public func backup(to url: URL) throws {
+        try dbWriter.writeWithoutTransaction { db in
+            try db.execute(sql: "VACUUM INTO ?", arguments: [url.path])
+        }
+    }
 }

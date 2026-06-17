@@ -75,6 +75,13 @@ struct CalendarView: View {
             )
             .contentShape(Rectangle())
             .onTapGesture { selected = c.day }
+            .accessibilityElement(children: .ignore)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(
+                c.trackedMinutes > 0
+                    ? "Day \(n), \(TimeFormat.duration(Int64(c.trackedMinutes) * 60_000)) logged"
+                    : "Day \(n)"
+            )
         } else {
             Color.clear.frame(maxWidth: .infinity, minHeight: 46)
         }

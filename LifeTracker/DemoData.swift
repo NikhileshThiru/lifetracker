@@ -29,5 +29,13 @@ enum DemoData {
             ev("Read", .leisure, nil, nil, .planned, seq: 1),       // loose placeholder
         ]
         for e in day { try? repo.insert(e) }
+
+        // One unsorted check-in (AI-unavailable fallback) to demo the inbox.
+        try? CheckInRepository(db.dbWriter).insert(CheckIn(
+            id: newID(), userId: nil, occurredAt: at(15, 5), timezone: tz.identifier,
+            rawTranscript: "grabbed a quick coffee with Sam, didn't catch the rest",
+            audioPath: nil, sttEngine: "speechanalyzer", inputMethod: "voice",
+            parseStatus: ParseStatus.manual.rawValue, createdAt: now, updatedAt: now, deletedAt: nil
+        ))
     }
 }

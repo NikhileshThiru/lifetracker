@@ -65,6 +65,26 @@ public struct CheckInRepository {
         try dbWriter.read { try CheckIn.fetchOne($0, key: id) }
     }
 
+    /// Check-ins that produced no structure yet (failed parse, manual fallback, or pending).
+    public func needingAttention(limit: Int = 50) throws -> [CheckIn] {
+        let statuses = [ParseStatus.failed.rawValue, ParseStatus.manual.rawValue, ParseStatus.pending.rawValue]
+        return try dbWriter.read { db in
+            try CheckIn
+                .filter(Column("deleted_at") == nil)
+                .filter(statuses.contains(Column("parse_status")))
+                .order(Column("occurred_at").desc)
+                .limit(limit)
+                .fetchAll(db)
+        }
+    }
+
+    /// Most recent check-in time (epoch ms), or nil if none.
+    public func lastOccurredAt() throws -> Int64? {
+        try dbWriter.read { db in
+            try Int64.fetchOne(db, sql: "SELECT MAX(occurred_at) FROM check_ins WHERE deleted_at IS NULL")
+        }
+    }
+
     public func setParseStatus(id: String, _ status: ParseStatus, now: Int64 = Clock.nowMillis()) throws {
         _ = try dbWriter.write { db in
             try CheckIn
@@ -164,6 +184,14 @@ public struct EventRepository {
         }
     }
 
+    /// Most recent event creation time (epoch ms), or nil if none. Used (with the
+    /// last check-in) to know when the user last logged anything, for the idle reminder.
+    public func lastCreatedAt() throws -> Int64? {
+        try dbWriter.read { db in
+            try Int64.fetchOne(db, sql: "SELECT MAX(created_at) FROM events WHERE deleted_at IS NULL")
+        }
+    }
+
     /// Confirmed, non-deleted events whose start falls in `[range.lowerBound, range.upperBound)`.
     public func confirmed(in range: Range<Int64>, userId: String? = nil) throws -> [Event] {
         try dbWriter.read { db in
@@ -203,5 +231,16 @@ public struct RevisionRepository {
                 .order(Column("created_at").desc)
                 .fetchAll(db)
         }
+    }
+}
+
+// MARK: - Parse runs (audit of parser attempts)
+
+public struct ParseRunRepository {
+    let dbWriter: any DatabaseWriter
+    public init(_ dbWriter: any DatabaseWriter) { self.dbWriter = dbWriter }
+
+    public func insert(_ run: ParseRun) throws {
+        try dbWriter.write { try run.insert($0) }
     }
 }

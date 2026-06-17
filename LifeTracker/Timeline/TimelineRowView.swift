@@ -11,7 +11,28 @@ struct TimelineRowView: View {
             EventRow(event: event, category: category, tz: tz)
         case .gap(let gap):
             GapRow(gap: gap, tz: tz)
+        case .nowMarker(let ms):
+            NowMarkerRow(ms: ms, tz: tz)
         }
+    }
+}
+
+private struct NowMarkerRow: View {
+    let ms: Int64
+    let tz: TimeZone
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(TimeFormat.clock(ms, tz: tz))
+                .font(.caption2.weight(.semibold))
+                .monospacedDigit()
+                .foregroundStyle(Theme.now)
+                .frame(width: Theme.timeColumnWidth, alignment: .trailing)
+            Circle().fill(Theme.now).frame(width: 7, height: 7)
+            Rectangle().fill(Theme.now.opacity(0.5)).frame(height: 1)
+        }
+        .padding(.vertical, 2)
+        .accessibilityHidden(true)
     }
 }
 
@@ -62,6 +83,7 @@ private struct EventRow: View {
             }
         }
         .opacity(isPlanned ? 0.9 : 1)
+        .accessibilityElement(children: .combine)
     }
 
     private var durationText: String? {
@@ -106,5 +128,6 @@ private struct GapRow: View {
                 .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 5]))
                 .foregroundStyle(Theme.hairline)
         }
+        .accessibilityElement(children: .combine)
     }
 }

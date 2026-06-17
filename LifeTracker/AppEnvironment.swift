@@ -19,6 +19,27 @@ final class AppEnvironment {
 
     func currentTime() -> Int64 { fixedNow ?? Clock.nowMillis() }
 
+    /// When the user last logged anything (check-in or event), for the idle reminder.
+    func lastActivityMillis() -> Int64? {
+        let lastEvent = (try? EventRepository(database.dbWriter).lastCreatedAt()) ?? nil
+        let lastCheckIn = (try? CheckInRepository(database.dbWriter).lastOccurredAt()) ?? nil
+        return [lastEvent, lastCheckIn].compactMap { $0 }.max()
+    }
+
+    /// (Re)schedules the inactivity nudge from current settings + last activity.
+    func rescheduleIdleReminder() {
+        let defaults = UserDefaults.standard
+        let enabled = defaults.bool(forKey: "reminderEnabled")
+        let stored = defaults.integer(forKey: "idleHours")
+        ReminderScheduler.reschedule(
+            enabled: enabled,
+            idleHours: stored == 0 ? 4 : stored,
+            lastActivity: lastActivityMillis(),
+            now: currentTime(),
+            timeZone: timeZone
+        )
+    }
+
     static func live() -> AppEnvironment {
         let tz = TimeZone.current
         if ProcessInfo.processInfo.arguments.contains("-seedDemo") {

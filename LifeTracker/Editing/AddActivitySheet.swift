@@ -78,6 +78,7 @@ struct AddActivitySheet: View {
             title: title, categoryId: categoryId, start: startMs, end: endMs,
             state: mappedState, now: env.currentTime()
         )
+        env.rescheduleIdleReminder()
         onSaved()
         dismiss()
     }

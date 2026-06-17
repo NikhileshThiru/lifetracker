@@ -55,6 +55,20 @@ struct SchemaTests {
         }
     }
 
+    @Test func backupProducesReadableCopy() throws {
+        let db = try AppDatabase.makeInMemory()
+        let url = FileManager.default.temporaryDirectory.appending(path: "lt-backup-\(newID()).sqlite")
+        try? FileManager.default.removeItem(at: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try db.backup(to: url)
+        let restored = try AppDatabase.make(atPath: url.path)
+        let count = try restored.dbWriter.read {
+            try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM categories WHERE is_default = 1")
+        }
+        #expect(count == 9)
+    }
+
     @Test func softDeleteLeavesTombstone() throws {
         let appDB = try AppDatabase.makeInMemory()
         let now = Clock.nowMillis()

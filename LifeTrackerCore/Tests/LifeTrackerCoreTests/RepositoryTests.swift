@@ -122,6 +122,23 @@ struct RepositoryTests {
         #expect(ids == [inRange.id]) // out-of-range and planned excluded
     }
 
+    @Test func lastActivityQueries() throws {
+        let (db, events, _, checkIns) = try fixture()
+        #expect(try events.lastCreatedAt() == nil)
+        #expect(try checkIns.lastOccurredAt() == nil)
+
+        try events.insert(makeEvent(start: 1000, end: 2000, state: .confirmed, now: 5_000))
+        try events.insert(makeEvent(start: 3000, end: 4000, state: .confirmed, now: 9_000))
+        try checkIns.insert(CheckIn(
+            id: newID(), userId: "u1", occurredAt: 7_000, timezone: "UTC", rawTranscript: "x",
+            audioPath: nil, sttEngine: "t", inputMethod: "voice", parseStatus: "parsed",
+            createdAt: 7_000, updatedAt: 7_000, deletedAt: nil
+        ))
+        #expect(try events.lastCreatedAt() == 9_000)
+        #expect(try checkIns.lastOccurredAt() == 7_000)
+        _ = db
+    }
+
     @Test func setParseStatusUpdates() throws {
         let (_, _, _, checkIns) = try fixture()
         let now = Clock.nowMillis()
