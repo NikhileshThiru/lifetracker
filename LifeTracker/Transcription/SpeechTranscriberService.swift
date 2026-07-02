@@ -3,7 +3,10 @@ import AVFoundation
 import Speech
 import LifeTrackerCore
 
-enum TranscriberError: Error { case notAuthorized }
+enum TranscriberError: Error {
+    case notAuthorized
+    case localeUnsupported
+}
 
 /// On-device live transcription via SpeechAnalyzer/SpeechTranscriber.
 /// NOTE: this path only truly runs on a physical device — verify/tune on-device.
@@ -15,8 +18,19 @@ final class SpeechTranscriberService: Transcriber, @unchecked Sendable {
     private var analyzer: SpeechAnalyzer?
     private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
     private var resultsTask: Task<Void, Never>?
+    private var interruptionObserver: (any NSObjectProtocol)?
     private var converter: AVAudioConverter?
     private var finalText = ""
+
+    /// Optional live input-level callback (0…1), fired from the audio tap for the
+    /// listening orb. Set before `start`. Called off the main thread.
+    var onLevel: (@Sendable (Float) -> Void)?
+    /// Fired when the on-device speech assets need downloading (first run, or
+    /// evicted under disk pressure), so the UI can say what the wait is.
+    var onDownloadingAssets: (@Sendable () -> Void)?
+    /// Fired if transcription dies mid-stream or the audio session is interrupted
+    /// (phone call) — the capture flow should wrap up with the text so far.
+    var onStopped: (@Sendable () -> Void)?
 
     static func requestPermissions() async -> Bool {
         let speech = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
@@ -26,9 +40,23 @@ final class SpeechTranscriberService: Transcriber, @unchecked Sendable {
         return speech && mic
     }
 
-    private func makeTranscriber() -> SpeechTranscriber {
-        SpeechTranscriber(
-            locale: Locale.current,
+    /// Picks a supported locale: the user's if the system supports it, else
+    /// English, else fails (the capture flow falls back to typing).
+    private func makeTranscriber() async throws -> SpeechTranscriber {
+        let supported = await SpeechTranscriber.supportedLocales
+        let current = Locale.current
+        let locale: Locale
+        if supported.contains(where: { $0.identifier(.bcp47) == current.identifier(.bcp47) }) {
+            locale = current
+        } else if let sameLanguage = supported.first(where: { $0.language.languageCode == current.language.languageCode }) {
+            locale = sameLanguage
+        } else if let english = supported.first(where: { $0.language.languageCode == .english }) {
+            locale = english
+        } else {
+            throw TranscriberError.localeUnsupported
+        }
+        return SpeechTranscriber(
+            locale: locale,
             transcriptionOptions: [],
             reportingOptions: [.volatileResults],
             attributeOptions: []
@@ -37,18 +65,24 @@ final class SpeechTranscriberService: Transcriber, @unchecked Sendable {
 
     func prepare() async throws {
         guard await Self.requestPermissions() else { throw TranscriberError.notAuthorized }
-        let t = makeTranscriber()
+        let t = try await makeTranscriber()
         transcriber = t
         // Download/ensure on-device assets for this locale (system may have evicted them).
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [t]) {
+            onDownloadingAssets?()
             try await request.downloadAndInstall()
         }
     }
 
     func start(onUpdate: @escaping @Sendable (String, Bool) -> Void) async throws {
         finalText = ""
-        let t = transcriber ?? makeTranscriber()
-        transcriber = t
+        let t: SpeechTranscriber
+        if let existing = transcriber {
+            t = existing
+        } else {
+            t = try await makeTranscriber()
+            transcriber = t
+        }
 
         let (stream, continuation) = AsyncStream.makeStream(of: AnalyzerInput.self)
         inputContinuation = continuation
@@ -70,12 +104,25 @@ final class SpeechTranscriberService: Transcriber, @unchecked Sendable {
                         onUpdate(live, false)
                     }
                 }
-            } catch { /* surfaced to the user via the empty/failed path */ }
+            } catch {
+                // Mid-stream failure: hand the flow back with whatever was heard.
+                self.onStopped?()
+            }
         }
 
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playAndRecord, mode: .measurement, options: [.duckOthers, .defaultToSpeaker])
         try session.setActive(true, options: .notifyOthersOnDeactivation)
+
+        // A phone call (or Siri) taking the session should end the check-in
+        // gracefully, not freeze the transcript.
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification, object: session, queue: nil
+        ) { [weak self] note in
+            let type = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
+                .flatMap(AVAudioSession.InterruptionType.init(rawValue:))
+            if type == .began { self?.onStopped?() }
+        }
 
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
@@ -86,7 +133,9 @@ final class SpeechTranscriberService: Transcriber, @unchecked Sendable {
 
         let cont = continuation
         let conv = converter
+        let levelCB = onLevel
         input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { buffer, _ in
+            if let levelCB { levelCB(Self.level(of: buffer)) }
             Self.feed(buffer: buffer, converter: conv, outFormat: resolvedOut, into: cont)
         }
 
@@ -96,13 +145,45 @@ final class SpeechTranscriberService: Transcriber, @unchecked Sendable {
     }
 
     func stop() async -> String {
+        teardownAudio()
+        try? await analyzer?.finalizeAndFinishThroughEndOfInput()
+        await resultsTask?.value
+        deactivateSession()
+        return finalText
+    }
+
+    /// Fast teardown for Cancel: no finalize pass, nothing returned.
+    func cancelCapture() async {
+        teardownAudio()
+        resultsTask?.cancel()
+        await analyzer?.cancelAndFinishNow()
+        deactivateSession()
+    }
+
+    private func teardownAudio() {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         inputContinuation?.finish()
-        try? await analyzer?.finalizeAndFinishThroughEndOfInput()
-        await resultsTask?.value
+        if let observer = interruptionObserver {
+            NotificationCenter.default.removeObserver(observer)
+            interruptionObserver = nil
+        }
+    }
+
+    private func deactivateSession() {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        return finalText
+    }
+
+    /// Normalized mic loudness (0…1) from a buffer's RMS, mapped from ~-50 dBFS…0 dBFS.
+    private static func level(of buffer: AVAudioPCMBuffer) -> Float {
+        guard let ch = buffer.floatChannelData?[0] else { return 0 }
+        let n = Int(buffer.frameLength)
+        guard n > 0 else { return 0 }
+        var sum: Float = 0
+        for i in 0..<n { let s = ch[i]; sum += s * s }
+        let rms = (sum / Float(n)).squareRoot()
+        let db = 20 * log10f(max(rms, 1e-7))
+        return max(0, min(1, (db + 50) / 50))
     }
 
     private static func feed(

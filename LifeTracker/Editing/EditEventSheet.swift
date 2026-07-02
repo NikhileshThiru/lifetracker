@@ -42,11 +42,11 @@ struct EditEventSheet: View {
                 Section("Times") {
                     Toggle("Set start", isOn: $hasStart)
                     if hasStart {
-                        DatePicker("Start", selection: $start, displayedComponents: .hourAndMinute)
+                        DatePicker("Start", selection: $start, displayedComponents: [.date, .hourAndMinute])
                     }
                     Toggle("Set end", isOn: $hasEnd)
                     if hasEnd {
-                        DatePicker("End", selection: $end, displayedComponents: .hourAndMinute)
+                        DatePicker("End", selection: $end, displayedComponents: [.date, .hourAndMinute])
                     }
                 }
                 if isPlanned {

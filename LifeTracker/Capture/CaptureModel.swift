@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UIKit
 import LifeTrackerCore
 
 @MainActor
@@ -9,21 +10,65 @@ final class CaptureModel {
         case preparing
         case recording
         case processing
-        case finished
-        case fallback(String)   // voice unavailable → typed entry
+        case result                // shows what was added, with undo
+        case fallback(String)      // voice unavailable → typed entry
+    }
+
+    /// One block the reconciliation created/changed, for the result card.
+    struct AddedItem: Identifiable {
+        let id: String
+        let title: String
+        let colorHex: String?
+        let detail: String
     }
 
     var phase: Phase = .preparing
+    var preparingMessage = "Starting…"
     var liveText = ""
     var typedText = ""
     var resultMessage = ""
+    var resultItems: [AddedItem] = []
+    var level: Float = 0          // smoothed mic loudness (0…1) driving the listening orb
+    var recordingSeconds = 0
 
+    var canUndo: Bool { undoBatchId != nil }
+
+    private var undoBatchId: String?
+    private var undoCheckInId: String?
+    private var timerTask: Task<Void, Never>?
     private let transcriber = SpeechTranscriberService()
 
     func begin(env: AppEnvironment) async {
+        // Screenshot/demo hook: fake the listening state where the mic can't run.
+        if ProcessInfo.processInfo.arguments.contains("-fakeListening") {
+            liveText = "Done with the workout, finished at 7, now starting dinner"
+            level = 0.55
+            phase = .recording
+            recordingSeconds = 8
+            return
+        }
+        transcriber.onLevel = { [weak self] raw in
+            Task { @MainActor in
+                guard let self else { return }
+                // Exponential smoothing so the orb swells and settles gently.
+                self.level += (raw - self.level) * 0.35
+            }
+        }
+        transcriber.onDownloadingAssets = { [weak self] in
+            Task { @MainActor in self?.preparingMessage = "Downloading the on-device speech model…" }
+        }
+        // Phone call or mid-stream engine failure → wrap up with the text so far.
+        transcriber.onStopped = { [weak self] in
+            Task { @MainActor in
+                guard let self, self.phase == .recording else { return }
+                await self.finishRecording(env: env)
+            }
+        }
         do {
             try await transcriber.prepare()
             phase = .recording
+            startTimer()
+            haptic(.medium)
             try await transcriber.start { [weak self] text, _ in
                 Task { @MainActor in self?.liveText = text }
             }
@@ -34,6 +79,8 @@ final class CaptureModel {
 
     func finishRecording(env: AppEnvironment) async {
         guard phase == .recording else { return }
+        stopTimer()
+        haptic(.light)
         phase = .processing
         let final = await transcriber.stop()
         let transcript = final.isEmpty ? liveText : final
@@ -52,7 +99,22 @@ final class CaptureModel {
     }
 
     func cancel() async {
-        _ = await transcriber.stop()
+        stopTimer()
+        await transcriber.cancelCapture()
+    }
+
+    /// Reverts the whole reconciliation batch and sends the check-in to the
+    /// Unsorted inbox so the words aren't lost.
+    func undo(env: AppEnvironment) {
+        guard let batchId = undoBatchId else { return }
+        try? EditService(env.database.dbWriter).undo(batchId: batchId, now: env.currentTime())
+        if let checkInId = undoCheckInId {
+            try? CheckInRepository(env.database.dbWriter)
+                .setParseStatus(id: checkInId, .reparseNeeded, now: env.currentTime())
+        }
+        undoBatchId = nil
+        CaptureLauncher.shared.changeToken = UUID()
+        haptic(.rigid)
     }
 
     private func ingest(transcript: String, method: InputMethod, engine: String, env: AppEnvironment) async {
@@ -63,12 +125,79 @@ final class CaptureModel {
             now: env.currentTime(), timeZone: env.timeZone
         )
         switch outcome {
-        case .parsed: resultMessage = "Added to your timeline."
-        case .manual: resultMessage = "Saved — structure it from the timeline."
-        case .failedParse: resultMessage = "Saved your words — couldn’t auto-structure this one."
+        case .parsed(let checkInId, let batchId):
+            resultMessage = "Added to your timeline"
+            resultItems = Self.items(for: batchId, env: env)
+            undoBatchId = batchId
+            undoCheckInId = checkInId
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        case .manual:
+            resultMessage = "Saved — structure it from Settings → Unsorted"
+        case .failedParse:
+            resultMessage = "Saved your words — couldn’t auto-structure this one"
+        case .skipped:
+            resultMessage = "Already added"
         }
         CaptureLauncher.shared.changeToken = UUID()
         env.rescheduleIdleReminder()
-        phase = .finished
+        phase = .result
+    }
+
+    /// The blocks this batch touched, oldest revision first (≈ spoken order).
+    private static func items(for batchId: String, env: AppEnvironment) -> [AddedItem] {
+        let revs = (try? RevisionRepository(env.database.dbWriter).byBatch(batchId)) ?? []
+        var catMap: [String: LifeTrackerCore.Category] = [:]
+        for c in (try? CategoryRepository(env.database.dbWriter).live()) ?? [] { catMap[c.id] = c }
+        let events = EventRepository(env.database.dbWriter)
+
+        var seen = Set<String>()
+        var items: [AddedItem] = []
+        for rev in revs.reversed() {
+            guard !seen.contains(rev.eventId),
+                  let ev = (try? events.find(id: rev.eventId)) ?? nil else { continue }
+            seen.insert(rev.eventId)
+            let cat = ev.categoryId.flatMap { catMap[$0] }
+            items.append(AddedItem(
+                id: ev.id,
+                title: ev.title ?? cat?.name ?? "Untitled",
+                colorHex: cat?.colorHex,
+                detail: detail(for: ev, tz: env.timeZone)
+            ))
+        }
+        return items
+    }
+
+    private static func detail(for ev: Event, tz: TimeZone) -> String {
+        if ev.deletedAt != nil { return "removed" }
+        let planned = ev.state == EventState.planned.rawValue
+        switch (ev.startAt, ev.endAt) {
+        case let (s?, e?):
+            let range = "\(TimeFormat.clock(s, tz: tz)) – \(TimeFormat.clock(e, tz: tz))"
+            return planned ? "\(range) · planned" : range
+        case let (s?, nil):
+            return planned ? "\(TimeFormat.clock(s, tz: tz)) · planned" : "started \(TimeFormat.clock(s, tz: tz))"
+        default:
+            return planned ? "planned" : ""
+        }
+    }
+
+    private func startTimer() {
+        recordingSeconds = 0
+        timerTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, self.phase == .recording else { return }
+                self.recordingSeconds += 1
+            }
+        }
+    }
+
+    private func stopTimer() {
+        timerTask?.cancel()
+        timerTask = nil
+    }
+
+    private func haptic(_ style: UIImpactFeedbackGenerator.FeedbackStyle) {
+        UIImpactFeedbackGenerator(style: style).impactOccurred()
     }
 }

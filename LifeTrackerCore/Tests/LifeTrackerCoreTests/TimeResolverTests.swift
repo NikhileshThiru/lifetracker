@@ -39,6 +39,23 @@ struct TimeResolverTests {
         #expect(r.resolveClock("9", direction: .future) == tomorrow9)
     }
 
+    @Test func ambiguousHoursPreferWakingHours() {
+        // "class at 3" said at 5 PM → tomorrow 3 PM, never 3 AM tomorrow.
+        let evening = TimeResolver(now: dayStart + h(17), timeZone: tz)
+        #expect(evening.resolveClock("3", direction: .future) == dayStart + h(24) + h(15))
+        // Retime to "4" said mid-morning → 4 PM today (nearest waking reading), not 4 AM.
+        let morning = TimeResolver(now: dayStart + h(9), timeZone: tz)
+        #expect(morning.resolveClock("4", direction: .nearest) == dayStart + h(16))
+        // Past stays unbiased: "went to bed at 2" said at 9 AM → 2 AM today.
+        #expect(morning.resolveClock("2", direction: .past) == dayStart + h(2))
+    }
+
+    @Test func noonAndMidnight() {
+        let r = TimeResolver(now: dayStart + h(10), timeZone: tz)
+        #expect(r.resolveClock("noon") == dayStart + h(12))
+        #expect(r.resolveClock("midnight", direction: .past) == dayStart)
+    }
+
     @Test func durations() {
         let r = TimeResolver(now: dayStart, timeZone: tz)
         #expect(r.resolveDuration("2 hours") == h(2))

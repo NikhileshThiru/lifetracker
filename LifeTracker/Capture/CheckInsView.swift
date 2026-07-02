@@ -65,7 +65,7 @@ struct CheckInsView: View {
         Task {
             let parser: TranscriptParser? = FoundationModelsParser.isAvailable ? FoundationModelsParser() : nil
             _ = await CaptureService(dbWriter: env.database.dbWriter, parser: parser)
-                .reparse(checkInId: ci.id, now: env.currentTime(), timeZone: env.timeZone)
+                .reparse(checkInId: ci.id)
             CaptureLauncher.shared.changeToken = UUID()
             working = false
             reload()

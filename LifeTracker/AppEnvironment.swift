@@ -5,8 +5,10 @@ import LifeTrackerCore
 /// App-wide environment: the on-device database, timezone, and current time.
 /// In demo mode (`-seedDemo` launch arg) it uses an in-memory DB seeded with a
 /// sample day and a fixed "now", so the UI is reproducible without touching real data.
+/// `@unchecked Sendable`: every stored property is immutable (`let`) and the
+/// database writer is itself Sendable.
 @Observable
-final class AppEnvironment {
+final class AppEnvironment: @unchecked Sendable {
     let database: AppDatabase
     let timeZone: TimeZone
     private let fixedNow: Int64?

@@ -4,6 +4,7 @@ import LifeTrackerCore
 struct StatsView: View {
     @Environment(AppEnvironment.self) private var env
     @State private var model = StatsModel()
+    @State private var launcher = CaptureLauncher.shared
 
     var body: some View {
         ScrollView {
@@ -35,7 +36,12 @@ struct StatsView: View {
         }
         .background(Theme.bg)
         .navigationTitle("Stats")
-        .task { model.load(database: env.database, tz: env.timeZone, now: env.currentTime()) }
+        .task { reload() }
+        .onChange(of: launcher.changeToken) { _, _ in reload() }
+    }
+
+    private func reload() {
+        model.load(database: env.database, tz: env.timeZone, now: env.currentTime())
     }
 
     private var maxWeekMinutes: Int {

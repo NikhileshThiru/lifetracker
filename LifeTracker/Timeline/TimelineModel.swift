@@ -2,15 +2,27 @@ import Foundation
 import Observation
 import LifeTrackerCore
 
+/// An event as it renders on one specific day: times are clipped to that day so an
+/// activity crossing midnight shows only its slice (with continuation markers).
+struct EventLayout: Identifiable {
+    let event: Event
+    let category: LifeTrackerCore.Category?
+    let displayStart: Int64?   // clipped to the day; nil only for loose blocks
+    let displayEnd: Int64?     // clipped to the day; nil = open / in progress
+    let continuesBefore: Bool  // began on an earlier day
+    let continuesAfter: Bool   // spills into a later day
+    var id: String { event.id }
+}
+
 /// One renderable row on the day timeline: a real event, or a computed gap.
 enum TimelineItem: Identifiable {
-    case event(Event, LifeTrackerCore.Category?)
+    case event(EventLayout)
     case gap(Gap)
     case nowMarker(Int64)
 
     var id: String {
         switch self {
-        case .event(let e, _): return "e_" + e.id
+        case .event(let l): return "e_" + l.event.id
         case .gap(let g): return "g_\(g.startAt)_\(g.endAt)"
         case .nowMarker: return "now"
         }
@@ -18,7 +30,7 @@ enum TimelineItem: Identifiable {
 
     var sortKey: Int64 {
         switch self {
-        case .event(let e, _): return e.startAt ?? .max
+        case .event(let l): return l.displayStart ?? .max
         case .gap(let g): return g.startAt
         case .nowMarker(let ms): return ms
         }
@@ -51,18 +63,29 @@ final class TimelineModel {
         let repo = EventRepository(database.dbWriter)
         let timed = (try? repo.events(on: day, tz: tz)) ?? []
         let gaps = GapCalculator.gaps(events: timed, day: day, timeZone: tz, now: now)
-
-        var merged: [TimelineItem] = timed.map { .event($0, $0.categoryId.flatMap { catMap[$0] }) }
-        merged += gaps.map { .gap($0) }
         let (dayStart, dayEnd) = day.bounds(in: tz)
+
+        let layouts = timed.map { e -> EventLayout in
+            EventLayout(
+                event: e,
+                category: e.categoryId.flatMap { catMap[$0] },
+                displayStart: e.startAt.map { max($0, dayStart) },
+                displayEnd: e.endAt.map { min($0, dayEnd) },
+                continuesBefore: e.continuesBefore(dayStart),
+                continuesAfter: e.continuesAfter(dayEnd, now: now)
+            )
+        }
+
+        var merged: [TimelineItem] = layouts.map { .event($0) }
+        merged += gaps.map { .gap($0) }
         if now >= dayStart && now < dayEnd { merged.append(.nowMarker(now)) }
         merged.sort { $0.sortKey < $1.sortKey }
         items = merged
 
+        // Per-day attribution: an overnight block counts only its slice of this day.
         trackedMinutes = timed.reduce(0) { acc, e in
-            guard e.state == EventState.confirmed.rawValue, let s = e.startAt else { return acc }
-            let end = e.endAt ?? now
-            return acc + max(0, Int((end - s) / 60_000))
+            guard e.state == EventState.confirmed.rawValue else { return acc }
+            return acc + e.minutes(in: dayStart, dayEnd, now: now)
         }
         gapCount = gaps.count
 

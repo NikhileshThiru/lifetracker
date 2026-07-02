@@ -50,17 +50,29 @@ final class MonthModel {
 
         var catMap: [String: LifeTrackerCore.Category] = [:]
         for cat in (try? CategoryRepository(database.dbWriter).live()) ?? [] { catMap[cat.id] = cat }
-        let events = (try? EventRepository(database.dbWriter).confirmed(in: monthStart..<monthEnd)) ?? []
+        // Overlap query + per-day clipping so an overnight block is split across the
+        // days it actually touches, not dumped whole on its start day.
+        let events = (try? EventRepository(database.dbWriter).confirmedOverlapping(in: monthStart..<monthEnd)) ?? []
 
         var dayMinutes: [Int: Int] = [:]
         var dayCatMinutes: [Int: [String: Int]] = [:]
         for e in events {
             guard let s = e.startAt else { continue }
-            let dayNum = LocalDay(containing: Clock.date(fromMillis: s), in: tz).day
             let end = e.endAt ?? now
-            let mins = max(0, Int((end - s) / 60_000))
-            dayMinutes[dayNum, default: 0] += mins
-            if let cid = e.categoryId { dayCatMinutes[dayNum, default: [:]][cid, default: 0] += mins }
+            let lo = max(s, monthStart)
+            let hi = min(end, monthEnd)
+            guard hi > lo else { continue }
+            var cursor = LocalDay(containing: Clock.date(fromMillis: lo), in: tz)
+            while true {
+                let (ds, de) = cursor.bounds(in: tz)
+                let mins = e.minutes(in: ds, de, now: now)
+                if mins > 0 && cursor.year == year && cursor.month == month {
+                    dayMinutes[cursor.day, default: 0] += mins
+                    if let cid = e.categoryId { dayCatMinutes[cursor.day, default: [:]][cid, default: 0] += mins }
+                }
+                if de >= hi { break }
+                cursor = LocalDay(containing: Clock.date(fromMillis: de), in: tz)
+            }
         }
 
         let today = LocalDay(containing: Clock.date(fromMillis: now), in: tz)

@@ -186,6 +186,176 @@ struct TimelineServiceTests {
         #expect(work.startAt == base + h(14))
     }
 
+    // MARK: - Multi-activity chains (the core "several things since I last checked in" case)
+
+    @Test func multipleCompletedBlocksChainSequentially() throws {
+        let (db, svc) = try env()
+        // "Had breakfast at 8, then went to the gym, then showered." said at 11.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [
+                ParsedBlock(title: "breakfast", category: "breakfast", categoryKind: "meal",
+                            statedStart: "8", temporalState: "completed"),
+                ParsedBlock(title: "gym", category: "gym", categoryKind: "exercise",
+                            temporalState: "completed"),
+                ParsedBlock(title: "shower", category: "shower", categoryKind: "chore",
+                            temporalState: "completed"),
+            ]),
+            now: base + h(11), timeZone: tz, userId: "u1"
+        )
+        let breakfast = try #require(try find(db, title: "breakfast"))
+        let gym = try #require(try find(db, title: "gym"))
+        let shower = try #require(try find(db, title: "shower"))
+        // Contiguous, ordered, ending at now — not three blocks all "ending now".
+        #expect(breakfast.startAt == base + h(8))
+        #expect(breakfast.endAt == gym.startAt)
+        #expect(gym.endAt == shower.startAt)
+        #expect(shower.endAt == base + h(11))
+        #expect(gym.endAt! > gym.startAt!)
+        // Inferred boundaries are marked lower-confidence for the UI.
+        #expect(gym.confidence < 1.0)
+    }
+
+    @Test func chainUsesStatedDurations() throws {
+        let (db, svc) = try env()
+        // "Worked from 2 for three hours" said at 6 → 14:00–17:00, not 14:00–18:00.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [
+                ParsedBlock(title: "work", category: "Work", categoryKind: "work",
+                            statedStart: "2", statedDuration: "3 hours",
+                            temporalState: "completed")
+            ]),
+            now: base + h(18), timeZone: tz, userId: "u1"
+        )
+        let work = try #require(try find(db, title: "work"))
+        #expect(work.startAt == base + h(14))
+        #expect(work.endAt == base + h(17))
+    }
+
+    @Test func completedDoesNotStealMismatchedOpenBlock() throws {
+        let (db, svc) = try env()
+        // "Starting class" at 12:30 → open block.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [ParsedBlock(title: "class", category: "class", categoryKind: "work",
+                                               statedStart: "12:30pm", temporalState: "inProgress")]),
+            now: base + h(12, 30), timeZone: tz, userId: "u1"
+        )
+        // "Just finished lunch." at 14:00 — class must NOT be hijacked; lunch must exist.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [ParsedBlock(title: "lunch", category: "lunch", categoryKind: "meal",
+                                               temporalState: "completed", closesOpenBlock: true)]),
+            now: base + h(14), timeZone: tz, userId: "u1"
+        )
+        let cls = try #require(try find(db, title: "class"))
+        let lunch = try #require(try find(db, title: "lunch"))
+        #expect(lunch.startAt != nil && lunch.endAt == base + h(14))
+        #expect(cls.endAt == lunch.startAt)          // class hands off to lunch
+        #expect(cls.title == "class")                // identity preserved
+        #expect(cls.endAt! > cls.startAt!)
+    }
+
+    @Test func chainStartsWhereTimelineLeftOff() throws {
+        let (db, svc) = try env()
+        // Logged block ends at 12:00.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [ParsedBlock(title: "meeting", category: "Work", categoryKind: "work",
+                                               statedStart: "10am", statedEnd: "12pm", temporalState: "completed")]),
+            now: base + h(12), timeZone: tz, userId: "u1"
+        )
+        // "Grabbed coffee, then read." at 13:00 → fills 12:00–13:00.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [
+                ParsedBlock(title: "coffee", category: "coffee", categoryKind: "leisure", temporalState: "completed"),
+                ParsedBlock(title: "read", category: "reading", categoryKind: "leisure", temporalState: "completed"),
+            ]),
+            now: base + h(13), timeZone: tz, userId: "u1"
+        )
+        let coffee = try #require(try find(db, title: "coffee"))
+        let read = try #require(try find(db, title: "read"))
+        #expect(coffee.startAt == base + h(12))
+        #expect(coffee.endAt == base + h(12, 30))
+        #expect(read.startAt == base + h(12, 30))
+        #expect(read.endAt == base + h(13))
+    }
+
+    @Test func chainEndsWhereInProgressBegins() throws {
+        let (db, svc) = try env()
+        // "Finished homework, been cooking since 7." at 19:30.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [
+                ParsedBlock(title: "homework", category: "homework", categoryKind: "work", temporalState: "completed"),
+                ParsedBlock(title: "cooking", category: "cooking", categoryKind: "chore",
+                            statedStart: "7", temporalState: "inProgress"),
+            ]),
+            now: base + h(19, 30), timeZone: tz, userId: "u1"
+        )
+        let hw = try #require(try find(db, title: "homework"))
+        let cook = try #require(try find(db, title: "cooking"))
+        #expect(hw.endAt == base + h(19))            // chain ends where cooking starts
+        #expect(cook.startAt == base + h(19))
+        #expect(cook.endAt == nil)                   // cooking is the open block
+    }
+
+    @Test func mislabeledStateStringStillCompletes() throws {
+        let (db, svc) = try env()
+        // The model said "Completed" (capitalized) — must not silently become planned.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [ParsedBlock(title: "run", category: "run", categoryKind: "exercise",
+                                               statedDuration: "30 minutes", temporalState: "Completed")]),
+            now: base + h(9), timeZone: tz, userId: "u1"
+        )
+        let run = try #require(try find(db, title: "run"))
+        #expect(run.state == EventState.confirmed.rawValue)
+        #expect(run.endAt == base + h(9))
+        #expect(run.startAt == base + h(8, 30))
+    }
+
+    @Test func wakeUpWithNoSleepBlockCreatesOvernightSleep() throws {
+        let (db, svc) = try env()
+        // Last thing logged yesterday ended at 23:00.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [ParsedBlock(title: "movie", category: "movie", categoryKind: "leisure",
+                                               statedStart: "10pm", statedEnd: "11pm", temporalState: "completed")]),
+            now: base - h(1), timeZone: tz, userId: "u1"
+        )
+        // "Just woke up." at 7:30 → sleep block 23:00–07:30 appears.
+        try svc.reconcile(
+            ParsedCheckIn(anchors: [ParsedAnchor(kind: "wakeUp")]),
+            now: base + h(7, 30), timeZone: tz, userId: "u1"
+        )
+        let sleep = try #require(try find(db, title: "Sleep"))
+        #expect(sleep.startAt == base - h(1))
+        #expect(sleep.endAt == base + h(7, 30))
+        #expect(sleep.state == EventState.confirmed.rawValue)
+    }
+
+    @Test func skipWithoutTargetHintIsNoOp() throws {
+        let (db, svc) = try env()
+        try svc.reconcile(ParsedCheckIn(blocks: [planned("run", "run", "exercise")]),
+                          now: base + h(9), timeZone: tz, userId: "u1")
+        // "Skipped it" with no recoverable target must not delete an arbitrary block.
+        try svc.reconcile(ParsedCheckIn(anchors: [ParsedAnchor(kind: "skip")]),
+                          now: base + h(12), timeZone: tz, userId: "u1")
+        #expect(try EventRepository(db.dbWriter).plannedBlocks(userId: "u1").count == 1)
+    }
+
+    @Test func completedMatchesPlannedByTitleOverCategory() throws {
+        let (db, svc) = try env()
+        try svc.reconcile(ParsedCheckIn(blocks: [
+            planned("run", "run", "exercise"),
+            planned("lift", "lift", "exercise"),
+        ]), now: base + h(9), timeZone: tz, userId: "u1")
+        // "Done with the lift." — must confirm lift, not the first exercise block.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [ParsedBlock(title: "lift", category: "lift", categoryKind: "exercise",
+                                               temporalState: "completed")]),
+            now: base + h(11), timeZone: tz, userId: "u1"
+        )
+        let lift = try #require(try find(db, title: "lift"))
+        let run = try #require(try find(db, title: "run"))
+        #expect(lift.state == EventState.confirmed.rawValue)
+        #expect(run.state == EventState.planned.rawValue)
+    }
+
     @Test func autoCreatesCategoryForNovelActivity() throws {
         let (db, svc) = try env()
         try svc.reconcile(ParsedCheckIn(blocks: [planned("pickleball", "pickleball", "exercise")]),

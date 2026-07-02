@@ -66,6 +66,38 @@ public struct EditService {
         try mutate(eventId, kind: .delete, now: now) { ev in ev.deletedAt = now }
     }
 
+    /// Merges category `sourceId` into `targetId`: repoints every live event
+    /// (one revision each, single batch — undoable as a unit) and archives the
+    /// source category so it stops matching and disappears from pickers.
+    @discardableResult
+    public func mergeCategory(sourceId: String, into targetId: String, now: Int64 = Clock.nowMillis()) throws -> String {
+        try dbWriter.write { db in
+            let batchId = newID()
+            let events = try Event
+                .filter(Column("deleted_at") == nil)
+                .filter(Column("category_id") == sourceId)
+                .fetchAll(db)
+            for var ev in events {
+                let before = Self.encode(ev)
+                ev.categoryId = targetId
+                ev.updatedAt = now
+                try ev.update(db)
+                let rev = EventRevision(
+                    id: newID(), eventId: ev.id, checkInId: nil, batchId: batchId,
+                    changeKind: ChangeKind.recategorize.rawValue,
+                    beforeJson: before, afterJson: Self.encode(ev), createdAt: now
+                )
+                try rev.insert(db)
+            }
+            if var cat = try Category.fetchOne(db, key: sourceId) {
+                cat.isArchived = true
+                cat.updatedAt = now
+                try cat.update(db)
+            }
+            return batchId
+        }
+    }
+
     /// Reverts every change in a batch to its pre-edit state (unit undo).
     public func undo(batchId: String, now: Int64 = Clock.nowMillis()) throws {
         try dbWriter.write { db in

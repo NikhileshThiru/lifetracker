@@ -21,28 +21,33 @@ struct CaptureView: View {
         case .preparing:
             VStack(spacing: 14) {
                 ProgressView().tint(Theme.textPrimary)
-                Text("Starting…").foregroundStyle(Theme.textSecondary)
+                Text(model.preparingMessage)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
             }
 
         case .recording:
             VStack(spacing: 24) {
                 Spacer()
-                Image(systemName: "waveform")
-                    .font(.system(size: 56))
-                    .foregroundStyle(Theme.textPrimary)
-                    .symbolEffect(.variableColor.iterative, options: .repeating)
+                ListeningOrb(level: model.level)
+                Text(elapsed)
+                    .font(.caption.weight(.medium))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.textSecondary)
                 ScrollView {
                     Text(model.liveText.isEmpty ? "Listening…" : model.liveText)
                         .font(.title3)
                         .foregroundStyle(model.liveText.isEmpty ? Theme.textSecondary : Theme.textPrimary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
                 }
-                .frame(maxHeight: 240)
+                .frame(maxHeight: 180)
                 Spacer()
                 Button { Task { await model.finishRecording(env: env) } } label: {
                     Text("Done").font(.headline).frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
                 Button("Cancel") { Task { await model.cancel(); dismiss() } }
                     .foregroundStyle(Theme.textSecondary)
             }
@@ -51,19 +56,11 @@ struct CaptureView: View {
         case .processing:
             VStack(spacing: 14) {
                 ProgressView().tint(Theme.textPrimary)
-                Text("Working…").foregroundStyle(Theme.textSecondary)
+                Text("Structuring…").foregroundStyle(Theme.textSecondary)
             }
 
-        case .finished:
-            VStack(spacing: 14) {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 52)).foregroundStyle(.green)
-                Text(model.resultMessage).foregroundStyle(Theme.textPrimary)
-            }
-            .task {
-                try? await Task.sleep(for: .seconds(1.2))
-                dismiss()
-            }
+        case .result:
+            resultCard
 
         case .fallback(let message):
             VStack(spacing: 16) {
@@ -84,5 +81,116 @@ struct CaptureView: View {
             }
             .padding(.vertical, 40)
         }
+    }
+
+    /// What the check-in became: each block with its category color and resolved
+    /// times, so a wrong parse is visible (and undoable) immediately.
+    private var resultCard: some View {
+        VStack(spacing: 20) {
+            Spacer()
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 46))
+                .foregroundStyle(.green)
+                .accessibilityHidden(true)
+            Text(model.resultMessage)
+                .font(.headline)
+                .foregroundStyle(Theme.textPrimary)
+                .multilineTextAlignment(.center)
+            if !model.resultItems.isEmpty {
+                VStack(spacing: 10) {
+                    ForEach(model.resultItems) { item in
+                        HStack(spacing: 12) {
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(Color.category(item.colorHex))
+                                .frame(width: 4, height: 32)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.title)
+                                    .font(.body.weight(.medium))
+                                    .foregroundStyle(Theme.textPrimary)
+                                if !item.detail.isEmpty {
+                                    Text(item.detail)
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.textSecondary)
+                                }
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(12)
+                        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.surface))
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+            }
+            Spacer()
+            HStack(spacing: 12) {
+                if model.canUndo {
+                    Button {
+                        model.undo(env: env)
+                        dismiss()
+                    } label: {
+                        Text("Undo").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(Theme.textSecondary)
+                }
+                Button { dismiss() } label: {
+                    Text("Done").font(.headline).frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+            }
+        }
+        .padding(.vertical, 40)
+        .task {
+            // Auto-dismiss so the voice flow stays one-press; Undo/Done interrupt it.
+            try? await Task.sleep(for: .seconds(5))
+            dismiss()
+        }
+    }
+
+    private var elapsed: String {
+        String(format: "%d:%02d", model.recordingSeconds / 60, model.recordingSeconds % 60)
+    }
+}
+
+/// The listening indicator: an accent orb that breathes on its own and swells with
+/// your voice level. Purely decorative (VoiceOver reads the live transcript instead).
+struct ListeningOrb: View {
+    let level: Float
+    @State private var breathe = false
+
+    var body: some View {
+        let l = CGFloat(max(0, min(1, level)))
+        ZStack {
+            Circle()
+                .fill(Theme.accent.opacity(0.10))
+                .frame(width: 200, height: 200)
+                .scaleEffect(1 + l * 0.6)
+            Circle()
+                .fill(Theme.accent.opacity(0.18))
+                .frame(width: 150, height: 150)
+                .scaleEffect(1 + l * 0.45)
+            Circle()
+                .fill(
+                    LinearGradient(
+                        colors: [Theme.accent, Theme.accent.opacity(0.72)],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                )
+                .frame(width: 104, height: 104)
+                .scaleEffect((breathe ? 1.05 : 0.97) * (1 + l * 0.35))
+                .shadow(color: Theme.accent.opacity(0.5), radius: 24, y: 6)
+            Image(systemName: "waveform")
+                .font(.system(size: 34, weight: .semibold))
+                .foregroundStyle(.white)
+        }
+        .frame(height: 220)
+        .animation(.easeOut(duration: 0.12), value: level)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) {
+                breathe = true
+            }
+        }
+        .accessibilityHidden(true)
     }
 }

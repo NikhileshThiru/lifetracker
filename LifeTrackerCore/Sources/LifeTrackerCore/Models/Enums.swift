@@ -23,6 +23,20 @@ public enum EventSource: String, Codable, Sendable {
 /// Per-activity temporal state the parser reports (not stored directly).
 public enum TemporalState: String, Codable, Sendable {
     case completed, inProgress, planned
+
+    /// Tolerant mapping of whatever string the model emitted ("Completed",
+    /// "done", "in progress") — a misspelled state must not silently flip a
+    /// finished activity into a planned one.
+    public static func parse(_ raw: String) -> TemporalState {
+        switch raw.trimmingCharacters(in: .whitespaces).lowercased() {
+        case "completed", "complete", "done", "finished", "past":
+            return .completed
+        case "inprogress", "in progress", "in_progress", "ongoing", "current", "now":
+            return .inProgress
+        default:
+            return .planned
+        }
+    }
 }
 
 public enum ChangeKind: String, Codable, Sendable {
@@ -42,4 +56,17 @@ public enum ParseStatus: String, Codable, Sendable {
 /// Retroactive-correction kinds the parser can emit.
 public enum AnchorKind: String, Codable, Sendable {
     case wakeUp, backfillStart, skip, retime, setEnd
+
+    /// Tolerant mapping of the model's string; nil (drop the anchor) when it is
+    /// unrecognizable — defaulting an unknown anchor to a retime mutates data.
+    public static func parse(_ raw: String) -> AnchorKind? {
+        switch raw.trimmingCharacters(in: .whitespaces).lowercased() {
+        case "wakeup", "wake up", "woke up", "wake": return .wakeUp
+        case "backfillstart", "backfill", "since": return .backfillStart
+        case "skip", "skipped", "cancel", "canceled", "cancelled": return .skip
+        case "retime", "correction", "reschedule": return .retime
+        case "setend", "set end": return .setEnd
+        default: return nil
+        }
+    }
 }

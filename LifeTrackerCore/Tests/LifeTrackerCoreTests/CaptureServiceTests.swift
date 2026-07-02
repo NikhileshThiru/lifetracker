@@ -75,7 +75,7 @@ struct CaptureServiceTests {
             ParsedBlock(title: "gym", category: "workout", categoryKind: "exercise", temporalState: "planned")
         ])
         let outcome = await CaptureService(dbWriter: db.dbWriter, parser: MockParser(result: parsed))
-            .reparse(checkInId: checkInId, timeZone: tz)
+            .reparse(checkInId: checkInId)
         guard case .parsed = outcome else { Issue.record("expected parsed"); return }
 
         try await db.dbWriter.read { db in
@@ -86,6 +86,49 @@ struct CaptureServiceTests {
         }
         let after = try CheckInRepository(db.dbWriter).needingAttention()
         #expect(!after.contains { $0.id == checkInId })
+    }
+
+    @Test func reparseResolvesAgainstOriginalCheckInTime() async throws {
+        let db = try AppDatabase.makeInMemory()
+        let day = LocalDay(year: 2026, month: 6, day: 16).bounds(in: tz).startMs
+        let originalNow = day + 18 * 3_600_000   // said at 6 PM that day
+
+        // Parse fails at capture time; the transcript is preserved.
+        let failed = await CaptureService(dbWriter: db.dbWriter, parser: FailingParser())
+            .ingest(transcript: "finished work at 5", inputMethod: .voice, sttEngine: "x",
+                    now: originalNow, timeZone: tz)
+        guard case let .failedParse(checkInId, _) = failed else { Issue.record("expected failed"); return }
+
+        // Re-parsed days later: "5" must still mean 5 PM of the ORIGINAL day.
+        let parsed = ParsedCheckIn(blocks: [
+            ParsedBlock(title: "work", category: "work", categoryKind: "work",
+                        statedEnd: "5", temporalState: "completed")
+        ])
+        let outcome = await CaptureService(dbWriter: db.dbWriter, parser: MockParser(result: parsed))
+            .reparse(checkInId: checkInId)
+        guard case .parsed = outcome else { Issue.record("expected parsed"); return }
+
+        let end = try await db.dbWriter.read { db in
+            try Int64.fetchOne(db, sql: "SELECT end_at FROM events WHERE title = 'work'")
+        }
+        #expect(end == day + 17 * 3_600_000)
+    }
+
+    @Test func reparseOfAlreadyParsedCheckInIsSkipped() async throws {
+        let db = try AppDatabase.makeInMemory()
+        let parsed = ParsedCheckIn(blocks: [
+            ParsedBlock(title: "gym", category: "workout", categoryKind: "exercise", temporalState: "planned")
+        ])
+        let svc = CaptureService(dbWriter: db.dbWriter, parser: MockParser(result: parsed))
+        let first = await svc.ingest(transcript: "gym later", inputMethod: .voice, sttEngine: "x", timeZone: tz)
+        guard case let .parsed(checkInId, _) = first else { Issue.record("expected parsed"); return }
+
+        let again = await svc.reparse(checkInId: checkInId)
+        guard case .skipped = again else { Issue.record("expected skipped, got \(again)"); return }
+        let events = try await db.dbWriter.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM events WHERE deleted_at IS NULL")
+        }
+        #expect(events == 1)   // no duplicates
     }
 
     @Test func ingestParserFailureKeepsTranscriptAndMarksFailed() async throws {

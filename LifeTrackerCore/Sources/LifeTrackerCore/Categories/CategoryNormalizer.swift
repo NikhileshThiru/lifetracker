@@ -28,6 +28,15 @@ public enum CategoryNormalizer {
         return false
     }
 
+    /// Looser matching for reconciling spoken titles against existing blocks
+    /// ("the workout" ~ "gym workout"): `matches`, or one key containing the other.
+    public static func titleMatches(_ a: String, _ b: String) -> Bool {
+        if matches(a, b) { return true }
+        let ka = key(a), kb = key(b)
+        guard ka.count >= 3, kb.count >= 3 else { return false }
+        return ka.contains(kb) || kb.contains(ka)
+    }
+
     static func levenshtein(_ a: String, _ b: String) -> Int {
         let x = Array(a), y = Array(b)
         if x.isEmpty { return y.count }

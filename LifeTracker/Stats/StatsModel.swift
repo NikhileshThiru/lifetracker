@@ -27,16 +27,15 @@ final class StatsModel {
         for cat in (try? CategoryRepository(database.dbWriter).live()) ?? [] { catMap[cat.id] = cat }
 
         let repo = EventRepository(database.dbWriter)
-        let weekEvents = (try? repo.confirmed(in: weekStart..<todayEnd)) ?? []
+        // Overlap query so overnight blocks from a prior day contribute their slice.
+        let weekEvents = (try? repo.confirmedOverlapping(in: weekStart..<todayEnd)) ?? []
 
         var todayMin: [String: Int] = [:]
         var weekMin: [String: Int] = [:]
         for e in weekEvents {
-            guard let s = e.startAt, let cid = e.categoryId else { continue }
-            let end = e.endAt ?? now
-            let mins = max(0, Int((end - s) / 60_000))
-            weekMin[cid, default: 0] += mins
-            if s >= todayStart && s < todayEnd { todayMin[cid, default: 0] += mins }
+            guard let cid = e.categoryId else { continue }
+            weekMin[cid, default: 0] += e.minutes(in: weekStart, todayEnd, now: now)
+            todayMin[cid, default: 0] += e.minutes(in: todayStart, todayEnd, now: now)
         }
 
         rows = weekMin.keys.compactMap { cid -> Row? in
@@ -47,10 +46,14 @@ final class StatsModel {
         .sorted { $0.weekMinutes > $1.weekMinutes }
 
         // Trailing streak: consecutive days (ending today) with any confirmed log.
-        let streakEvents = (try? repo.confirmed(in: streakWindowStart..<todayEnd)) ?? []
+        // Mark both the start day and end day so an overnight block counts for both.
+        let streakEvents = (try? repo.confirmedOverlapping(in: streakWindowStart..<todayEnd)) ?? []
         var daysWithData = Set<String>()
         for e in streakEvents {
-            if let s = e.startAt { daysWithData.insert(LocalDay(containing: Clock.date(fromMillis: s), in: tz).id) }
+            guard let s = e.startAt else { continue }
+            daysWithData.insert(LocalDay(containing: Clock.date(fromMillis: s), in: tz).id)
+            let end = e.endAt ?? now
+            daysWithData.insert(LocalDay(containing: Clock.date(fromMillis: end), in: tz).id)
         }
         var streak = 0
         var cursor = todayStartDate

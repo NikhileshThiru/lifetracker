@@ -54,6 +54,26 @@ struct EditServiceTests {
         #expect(try repo.find(id: ev.id)?.state == EventState.confirmed.rawValue)
     }
 
+    @Test func mergeCategoryRepointsEventsAndArchivesSource() throws {
+        let (db, repo, edit, ev) = try fixture()
+        let cats = try CategoryRepository(db.dbWriter).live()
+        let source = try #require(cats.first)
+        let target = try #require(cats.dropFirst().first)
+        try? edit.recategorize(eventId: ev.id, categoryId: source.id)
+
+        let batch = try edit.mergeCategory(sourceId: source.id, into: target.id)
+
+        let fetched = try #require(try repo.find(id: ev.id))
+        #expect(fetched.categoryId == target.id)
+        let live = try CategoryRepository(db.dbWriter).live()
+        #expect(!live.contains { $0.id == source.id })   // archived out of pickers
+
+        // Merge is one undoable batch.
+        try edit.undo(batchId: batch)
+        let restored = try #require(try repo.find(id: ev.id))
+        #expect(restored.categoryId == source.id)
+    }
+
     @Test func editingMissingEventReturnsNil() throws {
         let (_, _, edit, _) = try fixture()
         #expect(try edit.delete(eventId: "does-not-exist") == nil)

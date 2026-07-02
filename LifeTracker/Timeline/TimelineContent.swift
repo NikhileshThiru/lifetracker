@@ -8,6 +8,9 @@ struct TimelineContent: View {
     @Environment(AppEnvironment.self) private var env
     let day: LocalDay
     let navTitle: String?
+    /// Today hosts add in the app's bottom bar; drilled-in days show a per-day add button.
+    /// Voice check-in is always the global bottom-bar mic, so no per-view mic here.
+    var showsAddButton: Bool = true
 
     @State private var model = TimelineModel()
     @State private var showAdd = false
@@ -46,13 +49,11 @@ struct TimelineContent: View {
         .background(Theme.bg)
         .navigationTitle(navTitle ?? model.title)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button { launcher.present = true } label: { Image(systemName: "mic.fill") }
-                    .accessibilityLabel("Voice check-in")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button { showAdd = true } label: { Image(systemName: "plus") }
-                    .accessibilityLabel("Add activity")
+            if showsAddButton {
+                ToolbarItem(placement: .primaryAction) {
+                    Button { showAdd = true } label: { Image(systemName: "plus") }
+                        .accessibilityLabel("Add activity")
+                }
             }
         }
         .onChange(of: launcher.changeToken) { _, _ in reload() }
@@ -70,7 +71,7 @@ struct TimelineContent: View {
 
     private func tap(_ item: TimelineItem) {
         switch item {
-        case .event(let e, _): editingEvent = e
+        case .event(let layout): editingEvent = layout.event
         case .gap(let g): fillGap = g
         case .nowMarker: break
         }
@@ -85,8 +86,8 @@ struct TimelineContent: View {
         if args.contains("-presentAdd") { showAdd = true }
         if args.contains("-presentEdit"),
            let first = model.items.first(where: { if case .event = $0 { return true } else { return false } }),
-           case let .event(e, _) = first {
-            editingEvent = e
+           case let .event(layout) = first {
+            editingEvent = layout.event
         }
     }
 }
@@ -100,7 +101,7 @@ struct EmptyDayView: View {
             Text("Nothing logged yet")
                 .font(.headline)
                 .foregroundStyle(Theme.textPrimary)
-            Text("Press the Action Button and say what you’re doing.")
+            Text("Tap the mic below — or press the Action Button — and say what you’re doing.")
                 .font(.subheadline)
                 .foregroundStyle(Theme.textSecondary)
                 .multilineTextAlignment(.center)

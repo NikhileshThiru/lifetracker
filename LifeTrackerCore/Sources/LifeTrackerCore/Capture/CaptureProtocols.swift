@@ -4,12 +4,19 @@ import Foundation
 /// implementation lives in the app; Core only knows this interface (swappable for
 /// a cloud parser later). Stateless about the timeline — `TimelineService` reconciles.
 public protocol TranscriptParser: Sendable {
+    /// Identifies the prompt/schema revision, recorded on each parse run so
+    /// prompt changes stay measurable over time.
+    var promptVersion: String { get }
     func parse(
         transcript: String,
         now: Int64,
         timeZone: TimeZone,
         existingCategories: [String]
     ) async throws -> ParsedCheckIn
+}
+
+public extension TranscriptParser {
+    var promptVersion: String { "v1" }
 }
 
 /// Live speech-to-text. The SpeechAnalyzer implementation lives in the app

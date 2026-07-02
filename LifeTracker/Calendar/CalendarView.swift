@@ -5,6 +5,7 @@ struct CalendarView: View {
     @Environment(AppEnvironment.self) private var env
     @State private var model: MonthModel
     @State private var selected: LocalDay?
+    @State private var launcher = CaptureLauncher.shared
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 7)
     private let weekdays = ["S", "M", "T", "W", "T", "F", "S"]
@@ -37,7 +38,16 @@ struct CalendarView: View {
         .navigationDestination(item: $selected) { day in
             TimelineContent(day: day, navTitle: nil).environment(env)
         }
-        .task { model.load(database: env.database, tz: env.timeZone, now: env.currentTime()) }
+        .task {
+            model.load(database: env.database, tz: env.timeZone, now: env.currentTime())
+            // Screenshot/demo hook: show the month with the seeded history.
+            if ProcessInfo.processInfo.arguments.contains("-previousMonth") {
+                model.shift(by: -1, database: env.database, tz: env.timeZone, now: env.currentTime())
+            }
+        }
+        .onChange(of: launcher.changeToken) { _, _ in
+            model.load(database: env.database, tz: env.timeZone, now: env.currentTime())
+        }
     }
 
     private var header: some View {

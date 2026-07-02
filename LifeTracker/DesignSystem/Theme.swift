@@ -12,6 +12,11 @@ enum Theme {
     static let textSecondary = Color.white.opacity(0.55)
     static let now = Color(red: 1.0, green: 0.45, blue: 0.45)
 
+    /// The single app accent (indigo, matching the icon). Used sparingly: the mic
+    /// button, the listening orb, and the selected section in the top nav.
+    static let accent = Color(red: 0.369, green: 0.361, blue: 0.902)   // #5E5CE6
+    static let accentSoft = Color(red: 0.369, green: 0.361, blue: 0.902).opacity(0.35)
+
     static let corner: CGFloat = 14
     static let rowSpacing: CGFloat = 12
     static let hPadding: CGFloat = 20

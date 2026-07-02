@@ -5,6 +5,7 @@ public enum CaptureOutcome: Sendable, Equatable {
     case parsed(checkInId: String, batchId: String)
     case failedParse(checkInId: String, error: String)
     case manual(checkInId: String)   // AI unavailable → user structures by hand
+    case skipped(checkInId: String, reason: String)  // e.g. re-parse of an already-structured check-in
 }
 
 /// Orchestrates one captured check-in: always persist the raw transcript, then
@@ -37,18 +38,22 @@ public struct CaptureService {
         return await parseAndReconcile(checkInId: checkInId, transcript: transcript, now: now, timeZone: timeZone, userId: userId)
     }
 
-    /// Re-runs parsing for an existing check-in (e.g. a previously failed/manual one),
-    /// reconciling against the timeline. No-op-safe: these check-ins have no events yet.
-    public func reparse(
-        checkInId: String,
-        now: Int64 = Clock.nowMillis(),
-        timeZone: TimeZone = .current,
-        userId: String? = nil
-    ) async -> CaptureOutcome {
+    /// Re-runs parsing for an existing check-in (a previously failed/manual one).
+    /// Times resolve against the check-in's original moment and stored timezone —
+    /// never against "now", so re-parsing yesterday's "finished at 7" can't drift.
+    /// Check-ins that already produced events are skipped (would duplicate them).
+    public func reparse(checkInId: String, userId: String? = nil) async -> CaptureOutcome {
         guard let ci = try? CheckInRepository(dbWriter).find(id: checkInId) else {
             return .failedParse(checkInId: checkInId, error: "check-in not found")
         }
-        return await parseAndReconcile(checkInId: checkInId, transcript: ci.rawTranscript, now: now, timeZone: timeZone, userId: userId)
+        guard ci.parseStatus != ParseStatus.parsed.rawValue else {
+            return .skipped(checkInId: checkInId, reason: "already structured")
+        }
+        let tz = TimeZone(identifier: ci.timezone) ?? .current
+        return await parseAndReconcile(
+            checkInId: checkInId, transcript: ci.rawTranscript,
+            now: ci.occurredAt, timeZone: tz, userId: userId
+        )
     }
 
     private func parseAndReconcile(checkInId: String, transcript: String, now: Int64, timeZone: TimeZone, userId: String?) async -> CaptureOutcome {
@@ -78,7 +83,8 @@ public struct CaptureService {
     private func recordParseRun(checkInId: String, succeeded: Bool, output: String?, error: String?, now: Int64) {
         try? ParseRunRepository(dbWriter).insert(ParseRun(
             id: newID(), checkInId: checkInId, parser: "foundation_models", modelId: nil,
-            promptVersion: "v1", rawOutput: output, succeeded: succeeded, error: error, createdAt: now
+            promptVersion: parser?.promptVersion ?? "manual",
+            rawOutput: output, succeeded: succeeded, error: error, createdAt: now
         ))
     }
 

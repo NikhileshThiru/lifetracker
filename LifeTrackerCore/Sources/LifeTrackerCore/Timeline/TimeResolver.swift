@@ -29,24 +29,26 @@ public struct TimeResolver: Sendable {
 
         // Candidate 24-hour hours to try.
         var hours: [Int] = []
+        var ambiguous = false
         if parts.meridiem != nil {
             hours = [Self.to24(hour12: parts.hour, isPM: parts.meridiem == .pm)]
-        } else if parts.hour >= 13 {
+        } else if parts.hour >= 13 || parts.hour == 0 {
             hours = [parts.hour] // already unambiguous 24h
         } else {
             // Ambiguous: try both AM and PM interpretations.
+            ambiguous = true
             let am = parts.hour == 12 ? 0 : parts.hour
             let pm = parts.hour == 12 ? 12 : parts.hour + 12
             hours = [am, pm]
         }
 
-        var candidates: [Int64] = []
+        var candidates: [(ms: Int64, hour: Int)] = []
         for h in hours {
             for dayOffset in [-1, 0, 1] {
-                candidates.append(epoch(hour: h, minute: parts.minute, dayOffset: dayOffset))
+                candidates.append((epoch(hour: h, minute: parts.minute, dayOffset: dayOffset), h))
             }
         }
-        return pick(candidates, direction: direction)
+        return pick(candidates, direction: direction, ambiguous: ambiguous)
     }
 
     // MARK: Durations
@@ -110,6 +112,8 @@ public struct TimeResolver: Sendable {
 
     private static func parseClock(_ stated: String) -> ClockParts? {
         let s = stated.lowercased()
+        if s.contains("noon") { return ClockParts(hour: 12, minute: 0, meridiem: .pm) }
+        if s.contains("midnight") { return ClockParts(hour: 12, minute: 0, meridiem: .am) }
         var meridiem: Meridiem?
         if let m = firstGroup(#"([ap])\.?m\.?"#, in: s) {
             meridiem = (m == "p") ? .pm : .am
@@ -142,18 +146,28 @@ public struct TimeResolver: Sendable {
         return Clock.millis(from: dt)
     }
 
-    private func pick(_ candidates: [Int64], direction: ClockDirection) -> Int64? {
+    private func pick(_ candidates: [(ms: Int64, hour: Int)], direction: ClockDirection, ambiguous: Bool) -> Int64? {
         guard !candidates.isEmpty else { return nil }
+        let all = candidates.map(\.ms)
         let nearest = { (cs: [Int64]) -> Int64? in
             cs.min(by: { abs($0 - self.now) < abs($1 - self.now) })
         }
+        // When the speaker didn't disambiguate AM/PM, prefer readings landing in
+        // waking hours (07:00–23:59): a planned "at 3" means 3 PM, never 3 AM
+        // tomorrow. Past stays unbiased — "went to bed at 2" must resolve to the
+        // most recent 2 AM, and most-recent-past already behaves well.
+        let waking = candidates.filter { $0.hour >= 7 }.map(\.ms)
+        let pool = (ambiguous && !waking.isEmpty) ? waking : all
+
         switch direction {
         case .future:
-            return candidates.filter { $0 >= now }.min() ?? nearest(candidates)
+            return pool.filter { $0 >= now }.min()
+                ?? all.filter { $0 >= now }.min()
+                ?? nearest(all)
         case .past:
-            return candidates.filter { $0 <= now }.max() ?? nearest(candidates)
+            return all.filter { $0 <= now }.max() ?? nearest(all)
         case .nearest:
-            return nearest(candidates)
+            return nearest(pool) ?? nearest(all)
         }
     }
 

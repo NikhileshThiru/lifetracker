@@ -37,4 +37,25 @@ public final class AppDatabase {
             try db.execute(sql: "VACUUM INTO ?", arguments: [url.path])
         }
     }
+
+    public enum RestoreError: Error { case notALifeTrackerBackup }
+
+    /// Replaces this database's contents with those from a backup file at `url`
+    /// (produced by `backup(to:)`), then re-applies migrations so an older backup is
+    /// brought up to the current schema. Uses SQLite's online backup API, so the live
+    /// connection stays valid and in-place — no app restart needed.
+    ///
+    /// Validates the source looks like a Life Tracker backup *before* overwriting, so a
+    /// wrong file picked in the document browser can't clobber real data.
+    public func restore(from url: URL) throws {
+        var config = Configuration()
+        config.foreignKeysEnabled = true
+        let source = try DatabaseQueue(path: url.path, configuration: config)
+        let looksValid = try source.read { db in
+            try db.tableExists("events") && db.tableExists("categories") && db.tableExists("meta")
+        }
+        guard looksValid else { throw RestoreError.notALifeTrackerBackup }
+        try source.backup(to: dbWriter)
+        try migrator.migrate(dbWriter)
+    }
 }

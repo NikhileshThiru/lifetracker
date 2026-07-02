@@ -7,8 +7,8 @@ struct TimelineRowView: View {
 
     var body: some View {
         switch item {
-        case .event(let event, let category):
-            EventRow(event: event, category: category, tz: tz)
+        case .event(let layout):
+            EventRow(layout: layout, tz: tz)
         case .gap(let gap):
             GapRow(gap: gap, tz: tz)
         case .nowMarker(let ms):
@@ -37,17 +37,22 @@ private struct NowMarkerRow: View {
 }
 
 private struct EventRow: View {
-    let event: Event
-    let category: LifeTrackerCore.Category?
+    let layout: EventLayout
     let tz: TimeZone
 
+    private var event: Event { layout.event }
+    private var category: LifeTrackerCore.Category? { layout.category }
     private var isPlanned: Bool { event.state == EventState.planned.rawValue }
     private var isOpen: Bool { event.endAt == nil && !isPlanned }
     private var color: Color { .category(category?.colorHex) }
 
+    /// Reconciliation marks blocks whose boundaries were inferred (not stated)
+    /// with confidence < 1 — surface that as an "≈" so the times read as editable.
+    private var isApproximate: Bool { !isPlanned && event.confidence < 1.0 }
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Text(event.startAt.map { TimeFormat.clock($0, tz: tz) } ?? "—")
+            Text(layout.displayStart.map { (isApproximate ? "≈" : "") + TimeFormat.clock($0, tz: tz) } ?? "—")
                 .font(.caption)
                 .monospacedDigit()
                 .foregroundStyle(Theme.textSecondary)
@@ -59,17 +64,20 @@ private struct EventRow: View {
                 .opacity(isPlanned ? 0.5 : 1)
 
             VStack(alignment: .leading, spacing: 4) {
+                if layout.continuesBefore {
+                    ContinuationLabel(system: "arrow.up", text: "from yesterday")
+                }
                 Text(event.title ?? category?.name ?? "Untitled")
                     .font(.body.weight(.medium))
                     .foregroundStyle(Theme.textPrimary)
-                HStack(spacing: 5) {
-                    if let name = category?.name { Text(name) }
-                    if let dur = durationText { Text("· \(dur)") }
-                    if isPlanned { Text("· planned") }
-                    if isOpen { Text("· in progress") }
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
                 }
-                .font(.caption)
-                .foregroundStyle(Theme.textSecondary)
+                if layout.continuesAfter {
+                    ContinuationLabel(system: "arrow.down", text: "continues")
+                }
             }
             Spacer(minLength: 0)
         }
@@ -84,11 +92,54 @@ private struct EventRow: View {
         }
         .opacity(isPlanned ? 0.9 : 1)
         .accessibilityElement(children: .combine)
+        .accessibilityLabel(a11yLabel)
     }
 
+    private var subtitle: String {
+        var parts: [String] = []
+        // Don't repeat the category when the title already is it ("Sleep · Sleep").
+        if let name = category?.name,
+           name.localizedCaseInsensitiveCompare(event.title ?? "") != .orderedSame {
+            parts.append(name)
+        }
+        if let dur = durationText { parts.append(dur) }
+        if isPlanned { parts.append("planned") }
+        if isOpen { parts.append("in progress") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Duration of this day's slice (clipped), so an overnight block reads "6h" today, not 11h.
     private var durationText: String? {
-        guard let start = event.startAt, let end = event.endAt, end > start else { return nil }
+        guard let start = layout.displayStart, let end = layout.displayEnd, end > start else { return nil }
         return TimeFormat.duration(end - start)
+    }
+
+    private var a11yLabel: String {
+        var parts = [event.title ?? category?.name ?? "Untitled"]
+        if layout.continuesBefore { parts.append("continued from yesterday") }
+        if let start = layout.displayStart {
+            parts.append("from \(isApproximate ? "about " : "")\(TimeFormat.clock(start, tz: tz))")
+        }
+        if let dur = durationText { parts.append(dur) }
+        if isPlanned { parts.append("planned") }
+        if isOpen { parts.append("in progress") }
+        if layout.continuesAfter { parts.append("continues into tomorrow") }
+        return parts.joined(separator: ", ")
+    }
+}
+
+/// Small dim marker showing an activity spills across a day boundary.
+private struct ContinuationLabel: View {
+    let system: String
+    let text: String
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: system).font(.system(size: 9, weight: .semibold))
+            Text(text)
+        }
+        .font(.caption2)
+        .foregroundStyle(Theme.textSecondary)
+        .accessibilityHidden(true)
     }
 }
 

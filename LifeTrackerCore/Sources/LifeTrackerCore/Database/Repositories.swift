@@ -65,9 +65,11 @@ public struct CheckInRepository {
         try dbWriter.read { try CheckIn.fetchOne($0, key: id) }
     }
 
-    /// Check-ins that produced no structure yet (failed parse, manual fallback, or pending).
+    /// Check-ins that produced no structure yet (failed parse, manual fallback,
+    /// pending, or whose reconciliation was undone).
     public func needingAttention(limit: Int = 50) throws -> [CheckIn] {
-        let statuses = [ParseStatus.failed.rawValue, ParseStatus.manual.rawValue, ParseStatus.pending.rawValue]
+        let statuses = [ParseStatus.failed.rawValue, ParseStatus.manual.rawValue,
+                        ParseStatus.pending.rawValue, ParseStatus.reparseNeeded.rawValue]
         return try dbWriter.read { db in
             try CheckIn
                 .filter(Column("deleted_at") == nil)
@@ -199,6 +201,21 @@ public struct EventRepository {
                 .filter(Column("state") == EventState.confirmed.rawValue)
                 .filter(Column("start_at") != nil)
                 .filter(Column("start_at") >= range.lowerBound && Column("start_at") < range.upperBound)
+                .order(Column("start_at"))
+                .fetchAll(db)
+        }
+    }
+
+    /// Confirmed, non-deleted events that *overlap* `[range.lowerBound, range.upperBound)` —
+    /// including ones that started earlier and spill in (overnight/multi-day). Callers
+    /// attribute only each day's clipped slice via `Event.minutes(in:_:now:)`.
+    public func confirmedOverlapping(in range: Range<Int64>, userId: String? = nil) throws -> [Event] {
+        try dbWriter.read { db in
+            try Self.liveEvents(userId: userId)
+                .filter(Column("state") == EventState.confirmed.rawValue)
+                .filter(Column("start_at") != nil)
+                .filter(Column("start_at") < range.upperBound)
+                .filter(Column("end_at") == nil || Column("end_at") > range.lowerBound)
                 .order(Column("start_at"))
                 .fetchAll(db)
         }
