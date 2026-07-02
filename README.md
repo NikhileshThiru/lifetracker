@@ -7,7 +7,7 @@
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-blue)
 ![GRDB](https://img.shields.io/badge/SQLite-GRDB-003B57?logo=sqlite&logoColor=white)
 ![On-device AI](https://img.shields.io/badge/AI-100%25%20on--device-5E5CE6)
-![Tests](https://img.shields.io/badge/tests-82%20passing-30D158)
+![Tests](https://img.shields.io/badge/tests-93%20passing-30D158)
 
 <p align="center">
   <img src="docs/screenshots/today.png" width="260" alt="Today timeline with confirmed and planned blocks, gaps as tappable to-dos" />
@@ -30,6 +30,7 @@ Say *"Class from 3:30 to 5:30, then I'll hit the gym"* — the timeline shows a 
 - **A post-capture receipt** — every check-in shows exactly which blocks it created or changed, with one-tap **Undo**.
 - **Dynamic categories** — say *"went swimming"* once and a `swimming` category exists forever, de-duplicated against near-misses ("workout" / "working out" / "gym"), manageable (rename / recolor / merge / archive) from Settings.
 - **Timeline as the hero** — confirmed blocks solid, planned blocks dashed, gaps rendered as tappable to-dos, inferred times marked with `≈`.
+- **Ruthless editing** — long-press and drag a block's edge right on the timeline (5-minute steps with haptic ticks), split a block at any time, merge it with its neighbor, retime/recategorize/delete from a sheet — every change is a revision, every check-in undoes as a unit.
 - **Calendar, stats, streaks** — month view with per-day fill, time per category for today/this week. Describe, don't grade.
 - **Reminders & backup** — an inactivity nudge (local notifications, never overnight), and one-tap SQLite export / restore via the share sheet.
 
@@ -98,7 +99,7 @@ Free signing notes: free-provisioned apps expire after 7 days (reconnect and reb
 
 | Layer | How |
 |---|---|
-| Core engine (reconciliation, time resolution, gaps, undo, repositories) | `cd LifeTrackerCore && swift test` — 82 headless tests |
+| Core engine (reconciliation, time resolution, gaps, merge/split/undo, repositories) | `cd LifeTrackerCore && swift test` — 93 headless tests |
 | UI / navigation | iOS Simulator; `-seedDemo` launches an in-memory DB with a believable week |
 | Speech + parsing quality | Physical device only; `ParserEval` runs a labeled transcript corpus against the live parser and scores segmentation/state/anchor accuracy, so prompt changes are measurable |
 

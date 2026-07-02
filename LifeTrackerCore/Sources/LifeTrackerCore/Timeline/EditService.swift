@@ -66,6 +66,84 @@ public struct EditService {
         try mutate(eventId, kind: .delete, now: now) { ev in ev.deletedAt = now }
     }
 
+    /// Merges block `otherId` into `eventId` (spec §4): the kept block's span
+    /// becomes the union of both, the other is soft-deleted — one undoable batch.
+    /// If either block is still open (no end), the merged block stays open.
+    @discardableResult
+    public func merge(eventId: String, absorbing otherId: String, now: Int64 = Clock.nowMillis()) throws -> String? {
+        try dbWriter.write { db in
+            guard var keep = try Event.fetchOne(db, key: eventId),
+                  var other = try Event.fetchOne(db, key: otherId),
+                  keep.id != other.id else { return nil }
+            let batchId = newID()
+            let beforeKeep = Self.encode(keep)
+            let beforeOther = Self.encode(other)
+
+            let starts = [keep.startAt, other.startAt].compactMap { $0 }
+            keep.startAt = starts.min() ?? keep.startAt
+            keep.endAt = (keep.endAt == nil || other.endAt == nil)
+                ? nil
+                : max(keep.endAt!, other.endAt!)
+            if keep.state != EventState.confirmed.rawValue,
+               other.state == EventState.confirmed.rawValue {
+                keep.state = EventState.confirmed.rawValue
+            }
+            keep.updatedAt = now
+            other.deletedAt = now
+            other.updatedAt = now
+            try keep.update(db)
+            try other.update(db)
+
+            for (id, before, after, kind) in [
+                (keep.id, beforeKeep, Self.encode(keep), ChangeKind.merge),
+                (other.id, beforeOther, Self.encode(other), ChangeKind.delete),
+            ] {
+                let rev = EventRevision(
+                    id: newID(), eventId: id, checkInId: nil, batchId: batchId,
+                    changeKind: kind.rawValue, beforeJson: before, afterJson: after, createdAt: now
+                )
+                try rev.insert(db)
+            }
+            return batchId
+        }
+    }
+
+    /// Splits a block at `splitMs` (strictly inside its span, spec §4): the
+    /// original keeps [start, split), a twin gets [split, end) — one undoable batch.
+    @discardableResult
+    public func split(eventId: String, at splitMs: Int64, now: Int64 = Clock.nowMillis()) throws -> String? {
+        try dbWriter.write { db in
+            guard var ev = try Event.fetchOne(db, key: eventId),
+                  let start = ev.startAt, let end = ev.endAt,
+                  splitMs > start, splitMs < end else { return nil }
+            let batchId = newID()
+            let before = Self.encode(ev)
+            ev.endAt = splitMs
+            ev.updatedAt = now
+            try ev.update(db)
+
+            var twin = ev
+            twin.id = newID()
+            twin.startAt = splitMs
+            twin.endAt = end
+            twin.createdAt = now
+            twin.updatedAt = now
+            try twin.insert(db)
+
+            for (id, b, a, kind) in [
+                (ev.id, before, Self.encode(ev), ChangeKind.split),
+                (twin.id, nil, Self.encode(twin), ChangeKind.create),
+            ] {
+                let rev = EventRevision(
+                    id: newID(), eventId: id, checkInId: nil, batchId: batchId,
+                    changeKind: kind.rawValue, beforeJson: b, afterJson: a, createdAt: now
+                )
+                try rev.insert(db)
+            }
+            return batchId
+        }
+    }
+
     /// Merges category `sourceId` into `targetId`: repoints every live event
     /// (one revision each, single batch — undoable as a unit) and archives the
     /// source category so it stops matching and disappears from pickers.

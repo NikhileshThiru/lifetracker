@@ -26,7 +26,33 @@ public enum GapCalculator {
         let effEnd = min(dayEnd, now)                 // don't treat the future as a gap
         guard effEnd > dayStart else { return [] }
 
-        // Covered intervals from confirmed events, clipped to [dayStart, effEnd].
+        let merged = coveredIntervals(events: events, dayStart: dayStart, effEnd: effEnd)
+
+        var gaps: [Gap] = []
+        var cursor = dayStart
+        for (s, en) in merged {
+            if s > cursor { appendGap(from: cursor, to: s, dayStart: dayStart, tz: timeZone, into: &gaps) }
+            cursor = max(cursor, en)
+        }
+        if cursor < effEnd { appendGap(from: cursor, to: effEnd, dayStart: dayStart, tz: timeZone, into: &gaps) }
+        return gaps
+    }
+
+    /// Minutes of `day` actually covered by confirmed events — the *union* of
+    /// their intervals, so overlapping blocks never double-count and a day's
+    /// logged total can't exceed 24 hours.
+    public static func coveredMinutes(events: [Event], day: LocalDay, timeZone: TimeZone, now: Int64) -> Int {
+        let (dayStart, dayEnd) = day.bounds(in: timeZone)
+        if now < dayStart { return 0 }
+        let effEnd = min(dayEnd, now)
+        guard effEnd > dayStart else { return 0 }
+        let merged = coveredIntervals(events: events, dayStart: dayStart, effEnd: effEnd)
+        let total = merged.reduce(Int64(0)) { $0 + ($1.1 - $1.0) }
+        return Int(total / 60_000)
+    }
+
+    /// Merged (union) intervals of confirmed events, clipped to [dayStart, effEnd].
+    private static func coveredIntervals(events: [Event], dayStart: Int64, effEnd: Int64) -> [(Int64, Int64)] {
         var intervals: [(Int64, Int64)] = []
         for e in events where e.deletedAt == nil
             && e.state == EventState.confirmed.rawValue
@@ -46,15 +72,7 @@ public enum GapCalculator {
                 merged.append(seg)
             }
         }
-
-        var gaps: [Gap] = []
-        var cursor = dayStart
-        for (s, en) in merged {
-            if s > cursor { appendGap(from: cursor, to: s, dayStart: dayStart, tz: timeZone, into: &gaps) }
-            cursor = max(cursor, en)
-        }
-        if cursor < effEnd { appendGap(from: cursor, to: effEnd, dayStart: dayStart, tz: timeZone, into: &gaps) }
-        return gaps
+        return merged
     }
 
     private static func appendGap(from g0: Int64, to g1: Int64, dayStart: Int64, tz: TimeZone, into gaps: inout [Gap]) {

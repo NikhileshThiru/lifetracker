@@ -28,6 +28,15 @@ final class AppEnvironment: @unchecked Sendable {
         return [lastEvent, lastCheckIn].compactMap { $0 }.max()
     }
 
+    /// Daily rollover, run when the app comes to the foreground: expire planned
+    /// blocks from past days that were never confirmed, and close blocks left
+    /// open ("in progress") on a previous day.
+    func runMaintenance() {
+        let service = TimelineService(database.dbWriter)
+        _ = try? service.expireStalePlanned(asOf: currentTime(), timeZone: timeZone)
+        _ = try? service.closeStaleOpenBlocks(asOf: currentTime(), timeZone: timeZone)
+    }
+
     /// (Re)schedules the inactivity nudge from current settings + last activity.
     func rescheduleIdleReminder() {
         let defaults = UserDefaults.standard

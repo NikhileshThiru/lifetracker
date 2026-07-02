@@ -188,7 +188,7 @@ struct TimelineServiceTests {
 
     // MARK: - Multi-activity chains (the core "several things since I last checked in" case)
 
-    @Test func multipleCompletedBlocksChainSequentially() throws {
+    @Test func multipleCompletedBlocksChainCompactly() throws {
         let (db, svc) = try env()
         // "Had breakfast at 8, then went to the gym, then showered." said at 11.
         try svc.reconcile(
@@ -205,12 +205,14 @@ struct TimelineServiceTests {
         let breakfast = try #require(try find(db, title: "breakfast"))
         let gym = try #require(try find(db, title: "gym"))
         let shower = try #require(try find(db, title: "shower"))
-        // Contiguous, ordered, ending at now — not three blocks all "ending now".
+        // Stated time honored; untimed blocks get modest defaults walking back
+        // from now — the unclaimed mid-morning stays an honest gap.
         #expect(breakfast.startAt == base + h(8))
-        #expect(breakfast.endAt == gym.startAt)
-        #expect(gym.endAt == shower.startAt)
+        #expect(breakfast.endAt == base + h(8, 30))
+        #expect(gym.startAt == base + h(10))
+        #expect(gym.endAt == base + h(10, 30))
+        #expect(shower.startAt == base + h(10, 30))
         #expect(shower.endAt == base + h(11))
-        #expect(gym.endAt! > gym.startAt!)
         // Inferred boundaries are marked lower-confidence for the UI.
         #expect(gym.confidence < 1.0)
     }
@@ -247,21 +249,16 @@ struct TimelineServiceTests {
         )
         let cls = try #require(try find(db, title: "class"))
         let lunch = try #require(try find(db, title: "lunch"))
-        #expect(lunch.startAt != nil && lunch.endAt == base + h(14))
+        #expect(lunch.startAt == base + h(13, 30))   // compact default before now
+        #expect(lunch.endAt == base + h(14))
         #expect(cls.endAt == lunch.startAt)          // class hands off to lunch
         #expect(cls.title == "class")                // identity preserved
         #expect(cls.endAt! > cls.startAt!)
     }
 
-    @Test func chainStartsWhereTimelineLeftOff() throws {
+    @Test func untimedChainIsCompactBeforeNow() throws {
         let (db, svc) = try env()
-        // Logged block ends at 12:00.
-        try svc.reconcile(
-            ParsedCheckIn(blocks: [ParsedBlock(title: "meeting", category: "Work", categoryKind: "work",
-                                               statedStart: "10am", statedEnd: "12pm", temporalState: "completed")]),
-            now: base + h(12), timeZone: tz, userId: "u1"
-        )
-        // "Grabbed coffee, then read." at 13:00 → fills 12:00–13:00.
+        // "Grabbed coffee, then read." at 13:00 → two modest blocks ending at now.
         try svc.reconcile(
             ParsedCheckIn(blocks: [
                 ParsedBlock(title: "coffee", category: "coffee", categoryKind: "leisure", temporalState: "completed"),
@@ -275,6 +272,117 @@ struct TimelineServiceTests {
         #expect(coffee.endAt == base + h(12, 30))
         #expect(read.startAt == base + h(12, 30))
         #expect(read.endAt == base + h(13))
+    }
+
+    @Test func untimedChainNeverReachesAPreviousDay() throws {
+        let (db, svc) = try env()
+        // The last logged block ended YESTERDAY 23:00.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [ParsedBlock(title: "movie", category: "movie", categoryKind: "leisure",
+                                               statedStart: "10pm", statedEnd: "11pm", temporalState: "completed")]),
+            now: base - h(1), timeZone: tz, userId: "u1"
+        )
+        // Today at 14:00: three untimed activities. They must land compactly
+        // this afternoon — NOT stretch back across midnight to 23:00.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [
+                ParsedBlock(title: "laundry", category: "laundry", categoryKind: "chore", temporalState: "completed"),
+                ParsedBlock(title: "lunch", category: "lunch", categoryKind: "meal", temporalState: "completed"),
+                ParsedBlock(title: "walk", category: "walk", categoryKind: "exercise", temporalState: "completed"),
+            ]),
+            now: base + h(14), timeZone: tz, userId: "u1"
+        )
+        let laundry = try #require(try find(db, title: "laundry"))
+        let walk = try #require(try find(db, title: "walk"))
+        #expect(laundry.startAt == base + h(12, 30))   // 3 × 30m back from 14:00
+        #expect(walk.endAt == base + h(14))
+        // Yesterday untouched.
+        let movie = try #require(try find(db, title: "movie"))
+        #expect(movie.startAt == base - h(2))
+        #expect(movie.endAt == base - h(1))
+        #expect(movie.deletedAt == nil)
+    }
+
+    @Test func statedEveningTimeStaysCompactNoZeroLength() throws {
+        let (db, svc) = try env()
+        // "Played games at 11" said at 10:30 AM → 11 means last night 11 PM;
+        // the block must be a modest one, never zero-length, never stretched.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [ParsedBlock(title: "gaming", category: "gaming", categoryKind: "leisure",
+                                               statedStart: "11", temporalState: "completed")]),
+            now: base + h(10, 30), timeZone: tz, userId: "u1"
+        )
+        let gaming = try #require(try find(db, title: "gaming"))
+        #expect(gaming.startAt == base - h(1))         // yesterday 23:00
+        #expect(gaming.endAt == base - h(0, 30))       // 30-min default
+        #expect(gaming.endAt! > gaming.startAt!)
+    }
+
+    @Test func matchingIgnoresPreviousDayPlanned() throws {
+        let (db, svc) = try env()
+        // Yesterday morning: "gym at 6pm" → planned yesterday 18:00. Never done.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [planned("gym", "gym", "exercise", start: "6pm")]),
+            now: base - h(15), timeZone: tz, userId: "u1"
+        )
+        // Today: "done with the gym" → must create TODAY's block, not confirm
+        // (and thereby move) yesterday's stale plan.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [ParsedBlock(title: "gym", category: "gym", categoryKind: "exercise",
+                                               temporalState: "completed")]),
+            now: base + h(14), timeZone: tz, userId: "u1"
+        )
+        let events = try db.dbWriter.read {
+            try Event.filter(Column("title") == "gym").order(Column("created_at")).fetchAll($0)
+        }
+        #expect(events.count == 2)
+        #expect(events[0].state == EventState.planned.rawValue)   // yesterday's plan untouched
+        #expect(events[0].startAt == base - h(6))
+        #expect(events[1].state == EventState.confirmed.rawValue) // today's compact block
+        #expect(events[1].startAt == base + h(13, 30))
+        #expect(events[1].endAt == base + h(14))
+    }
+
+    @Test func wakeUpAnchorSkippedWhenSleepBlockPresent() throws {
+        let (db, svc) = try env()
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [ParsedBlock(title: "movie", category: "movie", categoryKind: "leisure",
+                                               statedStart: "10pm", statedEnd: "11pm", temporalState: "completed")]),
+            now: base - h(1), timeZone: tz, userId: "u1"
+        )
+        // Model double-reports: a completed sleep block AND a wakeUp anchor.
+        try svc.reconcile(
+            ParsedCheckIn(
+                blocks: [ParsedBlock(title: "sleep", category: "Sleep", categoryKind: "sleep",
+                                     statedStart: "11pm", statedEnd: "7am", temporalState: "completed")],
+                anchors: [ParsedAnchor(kind: "wakeUp")]
+            ),
+            now: base + h(7, 30), timeZone: tz, userId: "u1"
+        )
+        let sleeps = try db.dbWriter.read {
+            try Event.filter(Column("title").like("sleep")).filter(Column("deleted_at") == nil).fetchAll($0)
+        }
+        #expect(sleeps.count == 1)                     // exactly one, not two
+        #expect(sleeps[0].startAt == base - h(1))
+        #expect(sleeps[0].endAt == base + h(7))
+    }
+
+    @Test func wakeUpDoesNotDuplicateExistingSleep() throws {
+        let (db, svc) = try env()
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [ParsedBlock(title: "movie", category: "movie", categoryKind: "leisure",
+                                               statedStart: "10pm", statedEnd: "11pm", temporalState: "completed")]),
+            now: base - h(1), timeZone: tz, userId: "u1"
+        )
+        try svc.reconcile(ParsedCheckIn(anchors: [ParsedAnchor(kind: "wakeUp")]),
+                          now: base + h(7, 30), timeZone: tz, userId: "u1")
+        // Saying "just woke up" again later must not add a second sleep block.
+        try svc.reconcile(ParsedCheckIn(anchors: [ParsedAnchor(kind: "wakeUp")]),
+                          now: base + h(9), timeZone: tz, userId: "u1")
+        let sleeps = try db.dbWriter.read {
+            try Event.filter(Column("title") == "Sleep").filter(Column("deleted_at") == nil).fetchAll($0)
+        }
+        #expect(sleeps.count == 1)
     }
 
     @Test func chainEndsWhereInProgressBegins() throws {

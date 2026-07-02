@@ -54,6 +54,56 @@ struct EditServiceTests {
         #expect(try repo.find(id: ev.id)?.state == EventState.confirmed.rawValue)
     }
 
+    @Test func mergeSpansUnionAndUndoRestoresBoth() throws {
+        let (db, repo, edit, ev) = try fixture()   // ev: 9:00–10:00
+        let neighbor = Event(
+            id: newID(), userId: "u1", categoryId: nil, title: "more work", notes: nil,
+            startAt: 10 * H, endAt: 12 * H, state: EventState.confirmed.rawValue,
+            sequenceHint: nil, confidence: 1.0, source: EventSource.voice.rawValue, sourceRef: nil,
+            originCheckInId: nil, isPinned: false, createdAt: 1_000_000, updatedAt: 1_000_000, deletedAt: nil
+        )
+        try repo.insert(neighbor)
+
+        let batch = try #require(try edit.merge(eventId: ev.id, absorbing: neighbor.id))
+
+        let merged = try #require(try repo.find(id: ev.id))
+        #expect(merged.startAt == 9 * H)
+        #expect(merged.endAt == 12 * H)               // union of both spans
+        #expect(try #require(try repo.find(id: neighbor.id)).deletedAt != nil)
+
+        try edit.undo(batchId: batch)
+        #expect(try #require(try repo.find(id: ev.id)).endAt == 10 * H)
+        #expect(try #require(try repo.find(id: neighbor.id)).deletedAt == nil)
+    }
+
+    @Test func splitCreatesTwinAndUndoRestores() throws {
+        let (db, repo, edit, ev) = try fixture()   // ev: 9:00–10:00
+        let batch = try #require(try edit.split(eventId: ev.id, at: Int64(9) * H + 30 * 60_000))
+
+        let first = try #require(try repo.find(id: ev.id))
+        #expect(first.endAt == 9 * H + 30 * 60_000)
+        let twin = try db.dbWriter.read {
+            try Event.filter(Column("title") == "work")
+                .filter(Column("id") != ev.id)
+                .filter(Column("deleted_at") == nil)
+                .fetchOne($0)
+        }
+        #expect(twin?.startAt == 9 * H + 30 * 60_000)
+        #expect(twin?.endAt == 10 * H)
+
+        try edit.undo(batchId: batch)
+        #expect(try #require(try repo.find(id: ev.id)).endAt == 10 * H)   // restored
+        let twinId = try #require(twin?.id)
+        let twinAfter = try #require(try repo.find(id: twinId))
+        #expect(twinAfter.deletedAt != nil)                               // create undone
+    }
+
+    @Test func splitOutsideSpanIsRefused() throws {
+        let (_, _, edit, ev) = try fixture()
+        #expect(try edit.split(eventId: ev.id, at: 12 * H) == nil)
+        #expect(try edit.split(eventId: ev.id, at: 9 * H) == nil)   // boundary is not inside
+    }
+
     @Test func mergeCategoryRepointsEventsAndArchivesSource() throws {
         let (db, repo, edit, ev) = try fixture()
         let cats = try CategoryRepository(db.dbWriter).live()

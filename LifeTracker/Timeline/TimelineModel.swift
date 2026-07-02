@@ -82,11 +82,9 @@ final class TimelineModel {
         merged.sort { $0.sortKey < $1.sortKey }
         items = merged
 
-        // Per-day attribution: an overnight block counts only its slice of this day.
-        trackedMinutes = timed.reduce(0) { acc, e in
-            guard e.state == EventState.confirmed.rawValue else { return acc }
-            return acc + e.minutes(in: dayStart, dayEnd, now: now)
-        }
+        // Union coverage: overlapping blocks can't double-count, so the day's
+        // "logged" total is honest and can never exceed 24h.
+        trackedMinutes = GapCalculator.coveredMinutes(events: timed, day: day, timeZone: tz, now: now)
         gapCount = gaps.count
 
         let planned = (try? repo.plannedBlocks()) ?? []

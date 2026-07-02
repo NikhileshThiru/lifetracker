@@ -16,6 +16,9 @@ struct EditEventSheet: View {
     @State private var hasEnd: Bool
     @State private var start: Date
     @State private var end: Date
+    @State private var splitAt: Date
+    @State private var prevNeighbor: Event?
+    @State private var nextNeighbor: Event?
 
     init(event: Event, onSaved: @escaping () -> Void) {
         self.event = event
@@ -26,6 +29,9 @@ struct EditEventSheet: View {
         _hasEnd = State(initialValue: event.endAt != nil)
         _start = State(initialValue: Clock.date(fromMillis: event.startAt ?? Clock.nowMillis()))
         _end = State(initialValue: Clock.date(fromMillis: event.endAt ?? event.startAt ?? Clock.nowMillis()))
+        // Split defaults to the block's midpoint.
+        let mid = event.startAt.flatMap { s in event.endAt.map { e in (s + e) / 2 } }
+        _splitAt = State(initialValue: Clock.date(fromMillis: mid ?? Clock.nowMillis()))
     }
 
     private var isPlanned: Bool { event.state == EventState.planned.rawValue }
@@ -54,6 +60,28 @@ struct EditEventSheet: View {
                         Button("Mark as done") { markDone() }
                     }
                 }
+                if event.startAt != nil && event.endAt != nil || prevNeighbor != nil || nextNeighbor != nil {
+                    Section("Structure") {
+                        if event.startAt != nil && event.endAt != nil {
+                            DatePicker("Split at", selection: $splitAt, displayedComponents: .hourAndMinute)
+                            Button("Split into two blocks") { splitEvent() }
+                        }
+                        if let prev = prevNeighbor {
+                            Button {
+                                mergeWith(prev)
+                            } label: {
+                                Label("Merge with “\(prev.title ?? "previous block")”", systemImage: "arrow.triangle.merge")
+                            }
+                        }
+                        if let next = nextNeighbor {
+                            Button {
+                                mergeWith(next)
+                            } label: {
+                                Label("Merge with “\(next.title ?? "next block")”", systemImage: "arrow.triangle.merge")
+                            }
+                        }
+                    }
+                }
                 Section {
                     Button("Delete", role: .destructive) { deleteEvent() }
                 }
@@ -68,7 +96,18 @@ struct EditEventSheet: View {
         .preferredColorScheme(.dark)
         .task {
             categories = (try? CategoryRepository(env.database.dbWriter).live()) ?? []
+            loadNeighbors()
         }
+    }
+
+    /// The blocks directly before/after this one on its day (merge candidates).
+    private func loadNeighbors() {
+        guard let startAt = event.startAt else { return }
+        let day = LocalDay(containing: Clock.date(fromMillis: startAt), in: env.timeZone)
+        let dayEvents = ((try? EventRepository(env.database.dbWriter).events(on: day, tz: env.timeZone)) ?? [])
+        guard let idx = dayEvents.firstIndex(where: { $0.id == event.id }) else { return }
+        prevNeighbor = idx > 0 ? dayEvents[idx - 1] : nil
+        nextNeighbor = idx + 1 < dayEvents.count ? dayEvents[idx + 1] : nil
     }
 
     private var service: EditService { EditService(env.database.dbWriter) }
@@ -88,6 +127,18 @@ struct EditEventSheet: View {
 
     private func markDone() {
         try? service.confirm(eventId: event.id, now: now)
+        onSaved()
+        dismiss()
+    }
+
+    private func splitEvent() {
+        _ = try? service.split(eventId: event.id, at: Clock.millis(from: splitAt), now: now)
+        onSaved()
+        dismiss()
+    }
+
+    private func mergeWith(_ other: Event) {
+        _ = try? service.merge(eventId: event.id, absorbing: other.id, now: now)
         onSaved()
         dismiss()
     }

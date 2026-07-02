@@ -3,6 +3,7 @@ import LifeTrackerCore
 
 struct RootView: View {
     @Environment(AppEnvironment.self) private var env
+    @Environment(\.scenePhase) private var scenePhase
     @State private var tab = 0
     @State private var launcher = CaptureLauncher.shared
     @AppStorage("onboarded") private var onboarded = false
@@ -55,7 +56,16 @@ struct RootView: View {
             } else if !onboarded && !args.contains("-seedDemo") {
                 showOnboarding = true
             }
+            env.runMaintenance()
             env.rescheduleIdleReminder()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Daily rollover whenever the app returns to the foreground, so a
+            // day boundary crossed while backgrounded is handled before use.
+            if phase == .active {
+                env.runMaintenance()
+                launcher.changeToken = UUID()
+            }
         }
     }
 

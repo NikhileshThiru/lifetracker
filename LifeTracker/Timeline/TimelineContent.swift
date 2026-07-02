@@ -34,7 +34,7 @@ struct TimelineContent: View {
                         .padding(.bottom, 2)
                     }
                     ForEach(model.items) { item in
-                        TimelineRowView(item: item, tz: env.timeZone)
+                        TimelineRowView(item: item, tz: env.timeZone, onAdjust: adjust)
                             .contentShape(Rectangle())
                             .onTapGesture { tap(item) }
                     }
@@ -79,6 +79,17 @@ struct TimelineContent: View {
 
     private func reload() {
         model.load(database: env.database, day: day, now: env.currentTime(), tz: env.timeZone)
+    }
+
+    /// Commits a drag-edge retime (5-min-snapped in the row) as one revision.
+    private func adjust(_ event: Event, newStart: Int64?, newEnd: Int64?) {
+        _ = try? EditService(env.database.dbWriter).retime(
+            eventId: event.id,
+            start: newStart ?? event.startAt,
+            end: newEnd ?? event.endAt,
+            now: env.currentTime()
+        )
+        reload()
     }
 
     private func autoPresentForScreenshots() {

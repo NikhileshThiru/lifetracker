@@ -1,14 +1,17 @@
 import SwiftUI
+import UIKit
 import LifeTrackerCore
 
 struct TimelineRowView: View {
     let item: TimelineItem
     let tz: TimeZone
+    /// Commits a drag-edge retime: (event, newStart?, newEnd?) — one is non-nil.
+    var onAdjust: ((Event, Int64?, Int64?) -> Void)? = nil
 
     var body: some View {
         switch item {
         case .event(let layout):
-            EventRow(layout: layout, tz: tz)
+            EventRow(layout: layout, tz: tz, onAdjust: onAdjust)
         case .gap(let gap):
             GapRow(gap: gap, tz: tz)
         case .nowMarker(let ms):
@@ -39,12 +42,26 @@ private struct NowMarkerRow: View {
 private struct EventRow: View {
     let layout: EventLayout
     let tz: TimeZone
+    var onAdjust: ((Event, Int64?, Int64?) -> Void)? = nil
+
+    private enum DragEdge { case start, end }
+    @State private var dragEdge: DragEdge?
+    @State private var dragMinutes = 0
 
     private var event: Event { layout.event }
     private var category: LifeTrackerCore.Category? { layout.category }
     private var isPlanned: Bool { event.state == EventState.planned.rawValue }
     private var isOpen: Bool { event.endAt == nil && !isPlanned }
     private var color: Color { .category(category?.colorHex) }
+
+    // Drag-the-edges (spec §4): long-press an edge, then drag in 5-min steps.
+    // Edges clipped by the day boundary aren't draggable from this day's view.
+    private var canDragStart: Bool {
+        onAdjust != nil && event.startAt != nil && !layout.continuesBefore
+    }
+    private var canDragEnd: Bool {
+        onAdjust != nil && event.endAt != nil && !layout.continuesAfter
+    }
 
     /// Reconciliation marks blocks whose boundaries were inferred (not stated)
     /// with confidence < 1 — surface that as an "≈" so the times read as editable.
@@ -90,9 +107,105 @@ private struct EventRow: View {
                     .foregroundStyle(Theme.hairline)
             }
         }
+        .overlay(alignment: .top) { if canDragStart { dragHandle(.start) } }
+        .overlay(alignment: .bottom) { if canDragEnd { dragHandle(.end) } }
+        .overlay(alignment: dragEdge == .start ? .topTrailing : .bottomTrailing) {
+            if dragEdge != nil { dragLabel }
+        }
         .opacity(isPlanned ? 0.9 : 1)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(a11yLabel)
+    }
+
+    // MARK: Drag-edge editing
+
+    private func dragHandle(_ edge: DragEdge) -> some View {
+        Rectangle()
+            .fill(.clear)
+            .frame(height: 16)
+            .frame(maxWidth: .infinity)
+            .overlay(alignment: edge == .start ? .top : .bottom) {
+                Capsule()
+                    .fill(Theme.textSecondary.opacity(dragEdge == edge ? 0.9 : 0.25))
+                    .frame(width: 28, height: 3)
+                    .padding(edge == .start ? .top : .bottom, 4)
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                LongPressGesture(minimumDuration: 0.25)
+                    .sequenced(before: DragGesture(minimumDistance: 0))
+                    .onChanged { value in
+                        guard case .second(true, let drag) = value else { return }
+                        if dragEdge != edge {
+                            dragEdge = edge
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        }
+                        guard let drag else { return }
+                        // ~1.5pt per minute, snapped to 5-minute steps.
+                        let raw = Int((drag.translation.height / 1.5).rounded())
+                        let snapped = (raw / 5) * 5
+                        if snapped != dragMinutes {
+                            dragMinutes = snapped
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred(intensity: 0.6)
+                        }
+                    }
+                    .onEnded { _ in
+                        commitDrag(edge)
+                        dragEdge = nil
+                        dragMinutes = 0
+                    }
+            )
+            .accessibilityHidden(true)   // VoiceOver retimes via the edit sheet
+    }
+
+    private var dragLabel: some View {
+        Text(draggedTimeText)
+            .font(.caption.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(.white)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(Theme.accent))
+            .padding(6)
+            .allowsHitTesting(false)
+    }
+
+    private var draggedTimeText: String {
+        let delta = Int64(dragMinutes) * 60_000
+        switch dragEdge {
+        case .start:
+            let base = event.startAt ?? 0
+            return "starts \(TimeFormat.clock(clampedStart(base + delta), tz: tz))"
+        case .end:
+            let base = event.endAt ?? 0
+            return "ends \(TimeFormat.clock(clampedEnd(base + delta), tz: tz))"
+        case nil:
+            return ""
+        }
+    }
+
+    private func clampedStart(_ proposed: Int64) -> Int64 {
+        guard let end = event.endAt else { return proposed }
+        return min(proposed, end - 5 * 60_000)   // keep at least 5 minutes
+    }
+
+    private func clampedEnd(_ proposed: Int64) -> Int64 {
+        guard let start = event.startAt else { return proposed }
+        return max(proposed, start + 5 * 60_000)
+    }
+
+    private func commitDrag(_ edge: DragEdge) {
+        guard dragMinutes != 0, let onAdjust else { return }
+        let delta = Int64(dragMinutes) * 60_000
+        switch edge {
+        case .start:
+            guard let s = event.startAt else { return }
+            onAdjust(event, clampedStart(s + delta), nil)
+        case .end:
+            guard let e = event.endAt else { return }
+            onAdjust(event, nil, clampedEnd(e + delta))
+        }
+        UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
     }
 
     private var subtitle: String {

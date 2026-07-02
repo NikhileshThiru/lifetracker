@@ -19,11 +19,17 @@ public struct TimelineService {
     private static let plannedConfidence = 0.6
     /// Confidence for confirmed blocks whose times were inferred (chained/split),
     /// so the UI can hint they're editable guesses.
-    private static let inferredConfidence = 0.8
+    static let inferredConfidence = 0.8
     /// Default length for a completed activity with no time information at all.
     private static let defaultChainBlockMs: Int64 = 30 * 60_000
-    /// How far back "start where the timeline left off" may reach.
-    private static let chainFallbackWindowMs: Int64 = 12 * 3_600_000
+    /// How recent an open block must be for speech to match/close it — today's
+    /// words must never grab a block left running on a previous day.
+    private static let openMatchWindowMs: Int64 = 18 * 3_600_000
+    /// How far back an anchor ("actually X was 4 to 6") may reach for a target.
+    private static let anchorTargetWindowMs: Int64 = 24 * 3_600_000
+    /// Grace before today's start within which planned blocks are still matchable
+    /// (a plan spoken late last night for this morning).
+    private static let plannedMatchGraceMs: Int64 = 6 * 3_600_000
     /// Plausible overnight sleep span for the wake-up anchor.
     private static let minSleepMs: Int64 = 2 * 3_600_000
     private static let maxSleepMs: Int64 = 16 * 3_600_000
@@ -38,12 +44,26 @@ public struct TimelineService {
     ) throws -> ReconciliationResult {
         let resolver = TimeResolver(now: now, timeZone: timeZone)
         let batchId = newID()
-        var ctx = Context(now: now, userId: userId, checkInId: checkInId, batchId: batchId, resolver: resolver)
+        let dayStart = Clock.millis(
+            from: LocalDay(containing: Clock.date(fromMillis: now), in: timeZone).startDate(in: timeZone)
+        )
+        var ctx = Context(now: now, dayStartMs: dayStart, userId: userId, checkInId: checkInId,
+                          batchId: batchId, resolver: resolver)
+
+        // The model sometimes reports one utterance both ways ("woke up at 11" →
+        // a completed sleep block AND a wakeUp anchor). The block carries the
+        // richer stated times and will match/confirm any open sleep block, so the
+        // anchor is redundant — applying both duplicated sleep.
+        let hasSleepBlock = parsed.blocks.contains {
+            TemporalState.parse($0.temporalState) == .completed
+                && CategoryKind.parse($0.categoryKind) == .sleep
+        }
 
         try dbWriter.write { db in
             ctx.nextSeq = (try Self.maxSequenceHint(db, userId: userId) ?? 0) + 1
             // Anchors first: they correct/close existing blocks before new ones land.
             for anchor in parsed.anchors {
+                if hasSleepBlock, AnchorKind.parse(anchor.kind) == .wakeUp { continue }
                 try applyAnchor(anchor, db: db, ctx: &ctx)
             }
             try applyBlocks(parsed.blocks, db: db, ctx: &ctx)
@@ -54,6 +74,7 @@ public struct TimelineService {
     // Mutable per-reconcile state threaded through the helpers.
     private struct Context {
         let now: Int64
+        let dayStartMs: Int64    // local-day start of `now` (matching recency windows)
         let userId: String?
         let checkInId: String?
         let batchId: String
@@ -176,99 +197,50 @@ public struct TimelineService {
         return planned.first(where: { $0.categoryId != nil && $0.categoryId == categoryId })
     }
 
-    /// Lays out unmatched completed blocks as one contiguous run ending at `wEnd`.
-    /// Boundaries come from stated times, then stated durations, then "where the
-    /// timeline left off", then an even split — never "everything ends at now".
+    /// Lays out unmatched completed blocks compactly, walking backward from `wEnd`
+    /// (now, or the start of whatever is in progress). Stated times are used
+    /// verbatim; anything unstated gets a modest default length abutting the
+    /// block after it. Untimed activities therefore land just before now — they
+    /// never stretch to fill hours-long quiet spans, never reach back into a
+    /// previous day on their own, and can't produce zero-length artifacts.
+    /// Unclaimed time stays a gap, which is what gaps are for.
     private func layOutChain(_ pending: [PendingCompleted], wEnd: Int64, closeOpen: Bool, db: Database, ctx: inout Context) throws {
-        let n = pending.count
-        var bounds = [Int64?](repeating: nil, count: n + 1)
-        var synthetic = [Bool](repeating: false, count: n + 1)
-
-        // 1. Stated boundaries.
-        bounds[0] = pending[0].start
-        for i in 0..<n {
-            if let e = pending[i].end { bounds[i + 1] = e }
-            else if i + 1 < n, let s = pending[i + 1].start { bounds[i + 1] = s }
-        }
-
-        // 2. Stated durations off known boundaries (before and after defaulting
-        //    the chain end, so "from 2 for three hours" ends at 5, not at now).
-        func propagateDurations() {
-            for i in 0..<n where bounds[i + 1] == nil {
-                if let b = bounds[i], let d = pending[i].duration { bounds[i + 1] = b + d }
-            }
-            for i in (0..<n).reversed() where bounds[i] == nil {
-                if let b = bounds[i + 1], let d = pending[i].duration { bounds[i] = b - d }
-            }
-        }
-        propagateDurations()
-        if bounds[n] == nil { bounds[n] = wEnd }
-        propagateDurations()
-
-        // 3. No stated opening → start where the timeline left off: an unmatched
-        //    open block splits its window with the chain; otherwise the most
-        //    recent confirmed end (if recent enough).
-        let open = try openBlock(db, ctx: ctx)
-        if bounds[0] == nil {
-            if let open, let openStart = open.startAt, openStart < bounds[n]! {
-                bounds[0] = openStart + (bounds[n]! - openStart) / Int64(n + 1)
-                synthetic[0] = true
-            } else if let lastEnd = try lastConfirmedEnd(db, before: bounds[n]!, ctx: ctx),
-                      bounds[n]! - lastEnd <= Self.chainFallbackWindowMs, lastEnd < bounds[n]! {
-                bounds[0] = lastEnd
-                synthetic[0] = true
-            }
-        }
-
-        // 4. Remaining unknowns: even split between known neighbours; a leading
-        //    run with no anchor at all defaults to 30 minutes per block.
-        var i = 0
-        while i <= n {
-            guard bounds[i] == nil else { i += 1; continue }
-            var k = i
-            while k <= n, bounds[k] == nil { k += 1 }   // next known bound (bounds[n] is set)
-            if i == 0 {
-                for t in stride(from: k - 1, through: 0, by: -1) {
-                    bounds[t] = bounds[t + 1]! - (pending[t].duration ?? Self.defaultChainBlockMs)
-                    synthetic[t] = true
-                }
+        var placed: [(p: PendingCompleted, start: Int64, end: Int64, inferred: Bool)] = []
+        var cursor = wEnd   // a synthesized end may never pass the next block's start
+        for p in pending.reversed() {
+            let start: Int64
+            var end: Int64
+            let inferred: Bool
+            if let s = p.start {
+                start = s
+                end = p.end ?? (s + (p.duration ?? Self.defaultChainBlockMs))
+                inferred = (p.end == nil && p.duration == nil)
+            } else if let e = p.end {
+                end = e
+                start = e - (p.duration ?? Self.defaultChainBlockMs)
+                inferred = (p.duration == nil)
             } else {
-                let a = bounds[i - 1]!, b = bounds[k]!
-                let steps = Int64(k - i + 1)
-                let span = max(0, b - a)
-                for t in i..<k {
-                    bounds[t] = a + span * Int64(t - i + 1) / steps
-                    synthetic[t] = true
-                }
+                end = min(cursor, ctx.now)
+                start = end - (p.duration ?? Self.defaultChainBlockMs)
+                inferred = true
             }
-            i = k
+            if end <= start { end = start + 60_000 }   // contradictory stated times → 1 min, never 0
+            placed.append((p, start, end, inferred))
+            cursor = min(cursor, start)
         }
-
-        // Stated times can be contradictory; keep the chain monotonic.
-        for t in 1...n where bounds[t]! < bounds[t - 1]! { bounds[t] = bounds[t - 1]! }
+        placed.reverse()
 
         // A linear timeline can't have something "still running" underneath what
-        // was just recounted — close the open block where the chain begins.
-        if open != nil, closeOpen || bounds[0]! < ctx.now {
-            try closeOpenBlockIfAny(db: db, at: bounds[0]!, ctx: &ctx)
+        // was just recounted — close the (recent) open block where the chain begins.
+        if let chainStart = placed.first?.start, closeOpen || chainStart < ctx.now {
+            try closeOpenBlockIfAny(db: db, at: chainStart, ctx: &ctx)
         }
 
-        for (idx, p) in pending.enumerated() {
-            let inferred = synthetic[idx] || synthetic[idx + 1]
-            try insertNew(db: db, ctx: &ctx, categoryId: p.categoryId, title: p.block.title,
-                          start: bounds[idx]!, end: bounds[idx + 1]!, state: .confirmed,
-                          confidence: inferred ? Self.inferredConfidence : 1.0, sequenceHint: nil)
+        for item in placed {
+            try insertNew(db: db, ctx: &ctx, categoryId: item.p.categoryId, title: item.p.block.title,
+                          start: item.start, end: item.end, state: .confirmed,
+                          confidence: item.inferred ? Self.inferredConfidence : 1.0, sequenceHint: nil)
         }
-    }
-
-    /// Most recent confirmed end at/before `limit` (where the timeline left off).
-    private func lastConfirmedEnd(_ db: Database, before limit: Int64, ctx: Context) throws -> Int64? {
-        var req = Event
-            .filter(Column("deleted_at") == nil)
-            .filter(Column("state") == EventState.confirmed.rawValue)
-            .filter(Column("end_at") != nil && Column("end_at") <= limit)
-        if let userId = ctx.userId { req = req.filter(Column("user_id") == userId) }
-        return try Int64.fetchOne(db, req.select(max(Column("end_at"))))
     }
 
     // MARK: - Anchors
@@ -291,7 +263,8 @@ public struct TimelineService {
                 try sleep.update(db)
                 try record(.confirm, before: before, after: Self.encode(sleep), eventId: sleep.id, db: db, ctx: &ctx)
             } else if let bedtime = try lastConfirmedEnd(db, before: end - Self.minSleepMs, ctx: ctx),
-                      end - bedtime <= Self.maxSleepMs {
+                      end - bedtime <= Self.maxSleepMs,
+                      try !sleepOverlaps(db, start: bedtime, end: end, ctx: ctx) {
                 let sleepCategory = try resolveCategory(db, name: "Sleep", kind: CategoryKind.sleep.rawValue, ctx: ctx)
                 try insertNew(db: db, ctx: &ctx, categoryId: sleepCategory, title: "Sleep",
                               start: bedtime, end: end, state: .confirmed,
@@ -389,20 +362,59 @@ public struct TimelineService {
         return req
     }
 
+    /// The open block today's speech may match or close: recent only — a block
+    /// left running on a previous day is stale and untouchable from here
+    /// (maintenance closes it), so one check-in can't corrupt old days.
     private func openBlock(_ db: Database, ctx: Context) throws -> Event? {
         try liveEvents(db, ctx: ctx)
             .filter(Column("state") == EventState.confirmed.rawValue)
             .filter(Column("end_at") == nil)
             .filter(Column("start_at") != nil)
+            .filter(Column("start_at") >= ctx.now - Self.openMatchWindowMs)
             .order(Column("start_at").desc)
             .fetchOne(db)
     }
 
+    /// Planned blocks today's speech may confirm/skip: scheduled today, or loose
+    /// placeholders created today (with a small pre-midnight grace for plans
+    /// spoken late last night). Old plans are the rollover's business — never a
+    /// match target, so today's words can't move yesterday's blocks.
     private func plannedBlocks(_ db: Database, ctx: Context) throws -> [Event] {
-        try liveEvents(db, ctx: ctx)
+        let looseGrace = ctx.dayStartMs - Self.plannedMatchGraceMs
+        return try liveEvents(db, ctx: ctx)
             .filter(Column("state") == EventState.planned.rawValue)
+            .filter(Column("start_at") >= ctx.dayStartMs
+                || (Column("start_at") == nil && Column("created_at") >= looseGrace))
             .order(Column("sequence_hint"), Column("start_at"))
             .fetchAll(db)
+    }
+
+    /// Most recent confirmed end at/before `limit` (bedtime for the wake-up anchor).
+    private func lastConfirmedEnd(_ db: Database, before limit: Int64, ctx: Context) throws -> Int64? {
+        var req = Event
+            .filter(Column("deleted_at") == nil)
+            .filter(Column("state") == EventState.confirmed.rawValue)
+            .filter(Column("end_at") != nil && Column("end_at") <= limit)
+        if let userId = ctx.userId { req = req.filter(Column("user_id") == userId) }
+        return try Int64.fetchOne(db, req.select(max(Column("end_at"))))
+    }
+
+    /// Whether a confirmed sleep-category block already overlaps [start, end) —
+    /// guards the wake-up anchor against creating a second sleep.
+    private func sleepOverlaps(_ db: Database, start: Int64, end: Int64, ctx: Context) throws -> Bool {
+        let sleepIds = try Category
+            .filter(Column("deleted_at") == nil)
+            .filter(Column("kind") == CategoryKind.sleep.rawValue)
+            .fetchAll(db)
+            .map(\.id)
+        guard !sleepIds.isEmpty else { return false }
+        let hit = try liveEvents(db, ctx: ctx)
+            .filter(Column("state") == EventState.confirmed.rawValue)
+            .filter(sleepIds.contains(Column("category_id")))
+            .filter(Column("start_at") != nil && Column("start_at") < end)
+            .filter(Column("end_at") == nil || Column("end_at") > start)
+            .fetchOne(db)
+        return hit != nil
     }
 
     private func openSleepBlock(_ db: Database, ctx: Context) throws -> Event? {
@@ -432,8 +444,11 @@ public struct TimelineService {
         var pool: [Event] = []
         if let open = try openBlock(db, ctx: ctx) { pool.append(open) }
         pool += try plannedBlocks(db, ctx: ctx)
+        // Corrections only reach the recent past — "class was 4 to 6" must never
+        // retime a block from three days ago.
         pool += try liveEvents(db, ctx: ctx)
             .filter(Column("state") == EventState.confirmed.rawValue)
+            .filter(Column("start_at") >= ctx.now - Self.anchorTargetWindowMs)
             .order(Column("start_at").desc)
             .limit(5)
             .fetchAll(db)

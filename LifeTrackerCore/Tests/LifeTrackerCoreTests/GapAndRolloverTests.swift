@@ -57,6 +57,19 @@ struct GapCalculatorTests {
         #expect(gaps[0].kind == .sleepCandidate)
         #expect(gaps[0].endAt == base + h(9))
     }
+
+    @Test func coveredMinutesIsAUnionNeverDoubleCounted() {
+        // Two blocks overlapping 10:00–12:00: union is 9:00–13:00 = 4h, not 6h.
+        let events = [
+            confirmed(start: base + h(9), end: base + h(12)),
+            confirmed(start: base + h(10), end: base + h(13)),
+        ]
+        let mins = GapCalculator.coveredMinutes(events: events, day: day, timeZone: tz, now: base + h(20))
+        #expect(mins == 4 * 60)
+        // And it can never exceed the day, whatever the data claims.
+        let monster = [confirmed(start: base - h(20), end: base + h(40))]
+        #expect(GapCalculator.coveredMinutes(events: monster, day: day, timeZone: tz, now: base + h(48)) <= 24 * 60)
+    }
 }
 
 struct RolloverTests {
@@ -88,5 +101,47 @@ struct RolloverTests {
 
         let alive = Set(try repo.plannedBlocks(userId: "u1").map(\.id))
         #expect(alive == Set([todayPinned.id, todayLoose.id]))
+    }
+
+    private func open(start: Int64, categoryId: String? = nil) -> Event {
+        Event(id: newID(), userId: "u1", categoryId: categoryId, title: "o", notes: nil,
+              startAt: start, endAt: nil, state: EventState.confirmed.rawValue, sequenceHint: nil,
+              confidence: 1.0, source: EventSource.voice.rawValue, sourceRef: nil,
+              originCheckInId: nil, isPinned: false, createdAt: start, updatedAt: start, deletedAt: nil)
+    }
+
+    @Test func closesOpenBlocksLeftRunningOnAPreviousDay() throws {
+        let db = try AppDatabase.makeInMemory()
+        let repo = EventRepository(db.dbWriter)
+        let svc = TimelineService(db.dbWriter)
+
+        let staleOpen = open(start: base - h(10))      // yesterday 14:00, still "in progress"
+        let todayOpen = open(start: base + h(9))       // today, genuinely in progress
+        try repo.insert(staleOpen)
+        try repo.insert(todayOpen)
+
+        let closed = try svc.closeStaleOpenBlocks(asOf: base + h(10), timeZone: tz, userId: "u1")
+        #expect(closed == [staleOpen.id])
+
+        let fixed = try #require(try repo.find(id: staleOpen.id))
+        #expect(fixed.endAt == base - h(9))            // modest 1h default, its own day
+        #expect(fixed.confidence < 1.0)
+        let untouched = try #require(try repo.find(id: todayOpen.id))
+        #expect(untouched.endAt == nil)
+    }
+
+    @Test func staleOpenSleepFromLastNightIsSpared() throws {
+        let db = try AppDatabase.makeInMemory()
+        let repo = EventRepository(db.dbWriter)
+        let svc = TimelineService(db.dbWriter)
+        let sleepCat = try #require(try CategoryRepository(db.dbWriter).live().first { $0.kind == "sleep" })
+
+        let sleeping = open(start: base - h(1), categoryId: sleepCat.id)   // bed at 23:00
+        try repo.insert(sleeping)
+
+        // 7 AM: sleep is only 8h old — the wake-up anchor owns it, not maintenance.
+        let closed = try svc.closeStaleOpenBlocks(asOf: base + h(7), timeZone: tz, userId: "u1")
+        #expect(closed.isEmpty)
+        #expect(try #require(try repo.find(id: sleeping.id)).endAt == nil)
     }
 }
