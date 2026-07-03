@@ -44,6 +44,8 @@ public enum ParserEval {
                  blocks: 3, states: ["completed", "completed", "inProgress"]),
         EvalCase("Slept at 3, woke up at 9, did work until now, and now I'm driving to campus.",
                  blocks: 3, states: ["completed", "completed", "inProgress"]),
+        EvalCase("Worked from 9 to 10, and now I'm traveling.",
+                 blocks: 2, states: ["completed", "inProgress"]),
         EvalCase("Going to class, then run, then eat.",
                  blocks: 3, states: ["planned", "planned", "planned"]),
         EvalCase("Skipped the run.",

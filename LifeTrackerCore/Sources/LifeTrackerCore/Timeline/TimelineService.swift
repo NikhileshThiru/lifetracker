@@ -25,6 +25,9 @@ public struct TimelineService {
     /// Late-night grace: before ~6 AM, the voice-edit floor reaches back to
     /// yesterday evening (same wake period); otherwise voice only touches today.
     private static let plannedMatchGraceMs: Int64 = 6 * 3_600_000
+    /// "Worked 9 to 10, now traveling" — the new activity continues from where
+    /// the narration left off, as long as that isn't absurdly long ago.
+    private static let narrationContinueWindowMs: Int64 = 6 * 3_600_000
     /// Plausible overnight sleep span for the wake-up anchor.
     private static let minSleepMs: Int64 = 2 * 3_600_000
     private static let maxSleepMs: Int64 = 16 * 3_600_000
@@ -164,23 +167,37 @@ public struct TimelineService {
             }
         }
 
-        // In-progress starts bound the chain's end ("finished X and Y, been cooking since 7").
-        let inProgressStarts = inProgress.map { b in
-            b.statedStart.flatMap { ctx.resolver.resolveClock($0, direction: .past) } ?? ctx.now
+        // In-progress stated starts bound the chain's end ("finished X and Y,
+        // been cooking since 7").
+        let inProgressStatedStarts = inProgress.map { b in
+            b.statedStart.flatMap { ctx.resolver.resolveClock($0, direction: .past) }
         }
 
         if !pending.isEmpty {
-            let wEnd = pending.last?.end ?? inProgressStarts.first ?? ctx.now
+            let wEnd = pending.last?.end ?? (inProgressStatedStarts.first ?? nil) ?? ctx.now
             try layOutChain(pending, wEnd: wEnd, closeOpen: wantsOpenClosed, db: db, ctx: &ctx)
         }
 
-        // In-progress → becomes the new open block; close any prior open block first.
+        // In-progress → becomes the new open block; close any prior open block
+        // first. With no stated start, the first one continues from where this
+        // check-in's narration left off (spec §5: "finished at 7, now dinner" →
+        // dinner opens at 7), falling back to now.
         for (i, block) in inProgress.enumerated() {
             let categoryId = try resolveCategory(db, name: block.category, kind: block.categoryKind, ctx: ctx)
-            let start = inProgressStarts[i]
+            let start: Int64
+            var confidence = 1.0
+            if let stated = inProgressStatedStarts[i] {
+                start = stated
+            } else if i == 0, let floor = ctx.floorMs, floor < ctx.now,
+                      ctx.now - floor <= Self.narrationContinueWindowMs {
+                start = floor
+                confidence = Self.inferredConfidence
+            } else {
+                start = ctx.now
+            }
             try closeOpenBlockIfAny(db: db, at: start, ctx: &ctx)
             try insertNew(db: db, ctx: &ctx, categoryId: categoryId, title: block.title,
-                          start: start, end: nil, state: .confirmed, confidence: 1.0, sequenceHint: nil)
+                          start: start, end: nil, state: .confirmed, confidence: confidence, sequenceHint: nil)
         }
 
         // Planned: explicit times pin it; otherwise it's a loose, ordered placeholder.
@@ -265,6 +282,9 @@ public struct TimelineService {
             try insertNew(db: db, ctx: &ctx, categoryId: item.p.categoryId, title: item.p.block.title,
                           start: item.start, end: item.end, state: .confirmed,
                           confidence: item.inferred ? Self.inferredConfidence : 1.0, sequenceHint: nil)
+        }
+        if let last = placed.last {
+            ctx.floorMs = max(ctx.floorMs ?? last.end, last.end)   // narration continues from here
         }
     }
 

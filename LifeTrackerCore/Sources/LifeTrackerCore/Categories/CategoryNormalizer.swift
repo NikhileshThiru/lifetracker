@@ -55,6 +55,34 @@ public enum CategoryNormalizer {
     }
 }
 
+/// Cleans a spoken activity title the parser may have over-filled with clause
+/// fragments — "work from 9 to 10" → "work", "now traveling" → "traveling".
+/// Falls back (usually to the category name) when nothing meaningful remains.
+public enum TitleSanitizer {
+    private static let junk: Set<String> = [
+        "now", "then", "later", "today", "tonight", "that", "this", "it", "stuff",
+    ]
+    private static let patterns = [
+        // "from 9 to 10", "at 3pm", "until 5:30" — with an optional range tail.
+        #"\b(?:from|at|until|till)\s+\d{1,2}(?::\d{2})?\s*(?:[ap]\.?m\.?)?(?:\s*(?:to|until|till|-|–)\s*\d{1,2}(?::\d{2})?\s*(?:[ap]\.?m\.?)?)?"#,
+        #"\bright now\b"#,
+        #"^\s*now\b"#,
+        #"\bnow\s*$"#,
+    ]
+
+    public static func clean(_ raw: String, fallback: String) -> String {
+        var s = raw
+        for pattern in patterns {
+            guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            s = re.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: " ")
+        }
+        s = s.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.isEmpty || junk.contains(s.lowercased()) { return fallback }
+        return s
+    }
+}
+
 /// Default look for an auto-created category, keyed by coarse kind.
 public enum CategoryPalette {
     public static func color(for kind: CategoryKind) -> String {

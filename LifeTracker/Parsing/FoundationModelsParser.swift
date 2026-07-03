@@ -38,7 +38,7 @@ struct GenParsedCheckIn {
 
 @Generable
 struct GenBlock {
-    @Guide(description: "Short name of the activity as spoken, e.g. class, gym, dinner.")
+    @Guide(description: "Activity NAME only, 1-3 words (work, gym, dinner). Never include times or words like now/from/until.")
     let title: String
     @Guide(description: "Best-matching existing category name, or a new short lowercase name if none fits.")
     let category: String
@@ -70,7 +70,7 @@ struct GenAnchor {
 
 struct FoundationModelsParser: TranscriptParser {
     /// Bump when instructions/prompt change so parse_runs stay comparable.
-    static let promptVersion = "v3"
+    static let promptVersion = "v4"
     /// Existing category names injected into the prompt are capped to protect
     /// the model's fixed ~4096-token context window.
     private static let maxInjectedCategories = 40
@@ -120,6 +120,10 @@ struct FoundationModelsParser: TranscriptParser {
     → blocks: sleep (completed, start 3, end 9), work (completed, start 9, end now), \
     commute (inProgress); anchors: none
 
+    "Worked from 9 to 10 and now I'm traveling"
+    → blocks: work (completed, start 9, end 10), travel (inProgress); anchors: none. \
+    Titles are the bare activity name: "work", never "work from 9 to 10"; "travel", never "now traveling".
+
     "Just woke up"
     → blocks: none; anchors: wakeUp
 
@@ -148,28 +152,21 @@ struct FoundationModelsParser: TranscriptParser {
         """
     }
 
-    /// Filler the model sometimes promotes to a title ("now", "that") — the
-    /// category name is always a better label than these.
-    private static let junkTitles: Set<String> = [
-        "now", "then", "later", "today", "tonight", "that", "this", "it", "stuff",
-    ]
-
     private static func map(_ g: GenParsedCheckIn) -> ParsedCheckIn {
         func clean(_ s: String) -> String? {
             let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
             return t.isEmpty ? nil : t
         }
-        func title(_ raw: String, category: String) -> String {
-            guard let t = clean(raw), !junkTitles.contains(t.lowercased()) else { return category }
-            return t
-        }
-        let blocks = g.blocks.map {
-            ParsedBlock(
-                title: title($0.title, category: $0.category),
-                category: $0.category, categoryKind: $0.categoryKind.rawValue,
-                statedStart: clean($0.statedStart), statedEnd: clean($0.statedEnd),
-                statedDuration: clean($0.statedDuration),
-                temporalState: $0.temporalState.rawValue, closesOpenBlock: $0.closesOpenBlock
+        let blocks = g.blocks.map { (b: GenBlock) -> ParsedBlock in
+            // Deterministic cleanup of model over-fills: "work from 9 to 10" →
+            // "work"; "now traveling" → "traveling"; pure filler → category name.
+            let category = TitleSanitizer.clean(b.category, fallback: b.categoryKind.rawValue)
+            return ParsedBlock(
+                title: TitleSanitizer.clean(b.title, fallback: category),
+                category: category, categoryKind: b.categoryKind.rawValue,
+                statedStart: clean(b.statedStart), statedEnd: clean(b.statedEnd),
+                statedDuration: clean(b.statedDuration),
+                temporalState: b.temporalState.rawValue, closesOpenBlock: b.closesOpenBlock
             )
         }
         let anchors = g.anchors.map {

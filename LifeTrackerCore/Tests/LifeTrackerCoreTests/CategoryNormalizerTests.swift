@@ -2,6 +2,27 @@ import Foundation
 import Testing
 @testable import LifeTrackerCore
 
+struct TitleSanitizerTests {
+    @Test func stripsTimeFragmentsAndFiller() {
+        #expect(TitleSanitizer.clean("work from 9 to 10", fallback: "work") == "work")
+        #expect(TitleSanitizer.clean("now traveling", fallback: "travel") == "traveling")
+        #expect(TitleSanitizer.clean("meeting at 3pm", fallback: "work") == "meeting")
+        #expect(TitleSanitizer.clean("lunch until 1:30", fallback: "meal") == "lunch")
+        #expect(TitleSanitizer.clean("gaming right now", fallback: "gaming") == "gaming")
+    }
+
+    @Test func pureFillerFallsBackToCategory() {
+        #expect(TitleSanitizer.clean("now", fallback: "travel") == "travel")
+        #expect(TitleSanitizer.clean("that", fallback: "chore") == "chore")
+        #expect(TitleSanitizer.clean("  ", fallback: "other") == "other")
+    }
+
+    @Test func cleanTitlesPassThroughUnchanged() {
+        #expect(TitleSanitizer.clean("deep work", fallback: "work") == "deep work")
+        #expect(TitleSanitizer.clean("pickleball", fallback: "exercise") == "pickleball")
+    }
+}
+
 struct CategoryNormalizerTests {
     @Test func collapsesTrivialVariants() {
         #expect(CategoryNormalizer.matches("Workout", "work out"))

@@ -93,7 +93,7 @@ struct TimelineServiceTests {
 
         let dinner = try #require(try find(db, title: "dinner"))
         #expect(dinner.endAt == nil)             // now the open block
-        #expect(dinner.startAt == base + h(19, 30))
+        #expect(dinner.startAt == base + h(19))  // spec §5: opens where workout closed
 
         // Undo unit: one batch grouping both changes.
         #expect(result.affectedEventIds.count == 2)
@@ -341,6 +341,45 @@ struct TimelineServiceTests {
         #expect(events[1].state == EventState.confirmed.rawValue) // today's compact block
         #expect(events[1].startAt == base + h(13, 30))
         #expect(events[1].endAt == base + h(14))
+    }
+
+    @Test func inProgressContinuesFromStatedEndOfPreviousActivity() throws {
+        let (db, svc) = try env()
+        // "Worked from 9 to 10, and now I'm traveling." said at 10:37 —
+        // travel picks up at 10:00, not at the moment of speaking.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [
+                ParsedBlock(title: "work", category: "Work", categoryKind: "work",
+                            statedStart: "9", statedEnd: "10", temporalState: "completed"),
+                ParsedBlock(title: "travel", category: "travel", categoryKind: "transit",
+                            temporalState: "inProgress"),
+            ]),
+            now: base + h(10, 37), timeZone: tz, userId: "u1"
+        )
+        let work = try #require(try find(db, title: "work"))
+        let travel = try #require(try find(db, title: "travel"))
+        #expect(work.startAt == base + h(9))
+        #expect(work.endAt == base + h(10))
+        #expect(travel.startAt == base + h(10))     // continues the narration
+        #expect(travel.endAt == nil)
+        #expect(travel.confidence < 1.0)            // inferred → ≈ on the card
+    }
+
+    @Test func inProgressFallsBackToNowAfterALongGap() throws {
+        let (db, svc) = try env()
+        // "Worked 9 to 10" + "now gaming" said at 20:00 — 10 hours later is not
+        // a continuation; gaming starts now.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [
+                ParsedBlock(title: "work", category: "Work", categoryKind: "work",
+                            statedStart: "9am", statedEnd: "10am", temporalState: "completed"),
+                ParsedBlock(title: "gaming", category: "gaming", categoryKind: "leisure",
+                            temporalState: "inProgress"),
+            ]),
+            now: base + h(20), timeZone: tz, userId: "u1"
+        )
+        let gaming = try #require(try find(db, title: "gaming"))
+        #expect(gaming.startAt == base + h(20))
     }
 
     @Test func sleepWorkCommuteScenario() throws {
