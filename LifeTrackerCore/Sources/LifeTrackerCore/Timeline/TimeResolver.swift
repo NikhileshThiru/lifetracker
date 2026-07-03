@@ -152,12 +152,16 @@ public struct TimeResolver: Sendable {
         let nearest = { (cs: [Int64]) -> Int64? in
             cs.min(by: { abs($0 - self.now) < abs($1 - self.now) })
         }
-        // When the speaker didn't disambiguate AM/PM, prefer readings landing in
-        // waking hours (07:00–23:59): a planned "at 3" means 3 PM, never 3 AM
-        // tomorrow. Past stays unbiased — "went to bed at 2" must resolve to the
-        // most recent 2 AM, and most-recent-past already behaves well.
-        let waking = candidates.filter { $0.hour >= 7 }.map(\.ms)
-        let pool = (ambiguous && !waking.isEmpty) ? waking : all
+        // When the speaker didn't disambiguate AM/PM, prefer plausible readings:
+        // waking hours (07:00–23:59) — a planned "at 3" said mid-afternoon means
+        // 3 PM, never 3 AM tomorrow — OR anything near the current moment (the
+        // next 6 hours / last 2), so someone awake past midnight planning "at 2"
+        // gets 2 AM, not 2 PM. Past stays unbiased — "went to bed at 2" must
+        // resolve to the most recent 2 AM, and most-recent-past already behaves.
+        let plausible = candidates.filter {
+            $0.hour >= 7 || ($0.ms >= now - 2 * 3_600_000 && $0.ms <= now + 6 * 3_600_000)
+        }.map(\.ms)
+        let pool = (ambiguous && !plausible.isEmpty) ? plausible : all
 
         switch direction {
         case .future:

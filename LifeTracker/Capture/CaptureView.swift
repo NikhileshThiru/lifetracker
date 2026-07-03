@@ -5,6 +5,7 @@ struct CaptureView: View {
     @Environment(AppEnvironment.self) private var env
     @Environment(\.dismiss) private var dismiss
     @State private var model = CaptureModel()
+    @State private var editingEvent: Event?
 
     var body: some View {
         ZStack {
@@ -84,7 +85,8 @@ struct CaptureView: View {
     }
 
     /// What the check-in became: each block with its category color and resolved
-    /// times, so a wrong parse is visible (and undoable) immediately.
+    /// times. Every row is tappable to fix immediately; guessed times are marked
+    /// with ≈ and keep the card open until you're done.
     private var resultCard: some View {
         VStack(spacing: 20) {
             Spacer()
@@ -99,26 +101,42 @@ struct CaptureView: View {
             if !model.resultItems.isEmpty {
                 VStack(spacing: 10) {
                     ForEach(model.resultItems) { item in
-                        HStack(spacing: 12) {
-                            RoundedRectangle(cornerRadius: 2)
-                                .fill(Color.category(item.colorHex))
-                                .frame(width: 4, height: 32)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(item.title)
-                                    .font(.body.weight(.medium))
-                                    .foregroundStyle(Theme.textPrimary)
-                                if !item.detail.isEmpty {
-                                    Text(item.detail)
-                                        .font(.caption)
-                                        .foregroundStyle(Theme.textSecondary)
+                        Button {
+                            editItem(item)
+                        } label: {
+                            HStack(spacing: 12) {
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(Color.category(item.colorHex))
+                                    .frame(width: 4, height: 32)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.title)
+                                        .font(.body.weight(.medium))
+                                        .foregroundStyle(Theme.textPrimary)
+                                    if !item.detail.isEmpty {
+                                        Text(item.needsTime ? "≈ \(item.detail) · tap to fix" : item.detail)
+                                            .font(.caption)
+                                            .foregroundStyle(item.needsTime ? Theme.accent : Theme.textSecondary)
+                                    }
                                 }
+                                Spacer(minLength: 0)
+                                Image(systemName: "pencil")
+                                    .font(.caption)
+                                    .foregroundStyle(item.needsTime ? Theme.accent : Theme.textSecondary.opacity(0.5))
                             }
-                            Spacer(minLength: 0)
+                            .padding(12)
+                            .background(RoundedRectangle(cornerRadius: 12).fill(Theme.surface))
+                            .contentShape(Rectangle())
                         }
-                        .padding(12)
-                        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.surface))
+                        .buttonStyle(.plain)
                         .accessibilityElement(children: .combine)
+                        .accessibilityHint("Edits this block")
                     }
+                }
+                if model.hasGuessedTimes {
+                    Text("Times marked ≈ were estimated — tap a block to correct it.")
+                        .font(.footnote)
+                        .foregroundStyle(Theme.textSecondary)
+                        .multilineTextAlignment(.center)
                 }
             }
             Spacer()
@@ -141,11 +159,23 @@ struct CaptureView: View {
             }
         }
         .padding(.vertical, 40)
-        .task {
-            // Auto-dismiss so the voice flow stays one-press; Undo/Done interrupt it.
-            try? await Task.sleep(for: .seconds(5))
-            dismiss()
+        .sheet(item: $editingEvent) { event in
+            EditEventSheet(event: event) {
+                model.refreshItems(env: env)
+                CaptureLauncher.shared.changeToken = UUID()
+            }
+            .environment(env)
         }
+        .task {
+            // Auto-dismiss keeps the voice flow one-press — but only when nothing
+            // was guessed and the user isn't mid-edit.
+            try? await Task.sleep(for: .seconds(5))
+            if !model.hasGuessedTimes && editingEvent == nil { dismiss() }
+        }
+    }
+
+    private func editItem(_ item: CaptureModel.AddedItem) {
+        editingEvent = (try? EventRepository(env.database.dbWriter).find(id: item.id)) ?? nil
     }
 
     private var elapsed: String {

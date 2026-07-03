@@ -50,6 +50,18 @@ struct TimeResolverTests {
         #expect(morning.resolveClock("2", direction: .past) == dayStart + h(2))
     }
 
+    @Test func lateNightPlansResolveToSmallHours() {
+        // Awake at 11:50 PM planning "at 12" and "at 2" → 12 AM / 2 AM, not noon / 2 PM.
+        let lateNight = TimeResolver(now: dayStart + h(23, 50), timeZone: tz)
+        #expect(lateNight.resolveClock("12", direction: .future) == dayStart + h(24))
+        #expect(lateNight.resolveClock("2", direction: .future) == dayStart + h(26))
+        // And just past midnight too.
+        let pastMidnight = TimeResolver(now: dayStart + h(24, 30), timeZone: tz)
+        #expect(pastMidnight.resolveClock("2", direction: .future) == dayStart + h(26))
+        // A recent small-hours reference resolves nearby, not to noon.
+        #expect(pastMidnight.resolveClock("12", direction: .nearest) == dayStart + h(24))
+    }
+
     @Test func noonAndMidnight() {
         let r = TimeResolver(now: dayStart + h(10), timeZone: tz)
         #expect(r.resolveClock("noon") == dayStart + h(12))

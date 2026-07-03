@@ -20,6 +20,7 @@ final class CaptureModel {
         let title: String
         let colorHex: String?
         let detail: String
+        let needsTime: Bool   // times were guessed, not stated — worth a tap to fix
     }
 
     var phase: Phase = .preparing
@@ -32,9 +33,13 @@ final class CaptureModel {
     var recordingSeconds = 0
 
     var canUndo: Bool { undoBatchId != nil }
+    /// True when any block's times were inferred — the card then waits for the
+    /// user instead of auto-dismissing, so a wrong guess is one tap to fix.
+    var hasGuessedTimes: Bool { resultItems.contains { $0.needsTime } }
 
     private var undoBatchId: String?
     private var undoCheckInId: String?
+    private var resultBatchId: String?
     private var timerTask: Task<Void, Never>?
     private let transcriber = SpeechTranscriberService()
 
@@ -130,6 +135,7 @@ final class CaptureModel {
             resultItems = Self.items(for: batchId, env: env)
             undoBatchId = batchId
             undoCheckInId = checkInId
+            resultBatchId = batchId
             UINotificationFeedbackGenerator().notificationOccurred(.success)
         case .manual:
             resultMessage = "Saved — structure it from Settings → Unsorted"
@@ -141,6 +147,12 @@ final class CaptureModel {
         CaptureLauncher.shared.changeToken = UUID()
         env.rescheduleIdleReminder()
         phase = .result
+    }
+
+    /// Re-reads the card's blocks after an in-card edit.
+    func refreshItems(env: AppEnvironment) {
+        guard let batchId = resultBatchId else { return }
+        resultItems = Self.items(for: batchId, env: env)
     }
 
     /// The blocks this batch touched, oldest revision first (≈ spoken order).
@@ -157,11 +169,15 @@ final class CaptureModel {
                   let ev = (try? events.find(id: rev.eventId)) ?? nil else { continue }
             seen.insert(rev.eventId)
             let cat = ev.categoryId.flatMap { catMap[$0] }
+            let guessed = ev.deletedAt == nil
+                && ev.state == EventState.confirmed.rawValue
+                && ev.confidence < 1.0
             items.append(AddedItem(
                 id: ev.id,
                 title: ev.title ?? cat?.name ?? "Untitled",
                 colorHex: cat?.colorHex,
-                detail: detail(for: ev, tz: env.timeZone)
+                detail: detail(for: ev, tz: env.timeZone),
+                needsTime: guessed
             ))
         }
         return items
