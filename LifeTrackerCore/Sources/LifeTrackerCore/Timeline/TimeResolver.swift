@@ -25,6 +25,9 @@ public struct TimeResolver: Sendable {
     /// Resolves a stated clock time ("3:30", "3:30pm", "15:30", "7") to an
     /// absolute epoch-ms near `now`, disambiguating AM/PM via `direction`.
     public func resolveClock(_ stated: String, direction: ClockDirection = .nearest) -> Int64? {
+        // "now" is a valid stated time ("worked until now") — but never "noon".
+        let lowered = stated.lowercased()
+        if lowered.contains("now"), !lowered.contains("noon") { return now }
         guard let parts = Self.parseClock(stated) else { return nil }
 
         // Candidate 24-hour hours to try.

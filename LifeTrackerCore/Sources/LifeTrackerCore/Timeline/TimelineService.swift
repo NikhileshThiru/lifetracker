@@ -22,13 +22,8 @@ public struct TimelineService {
     static let inferredConfidence = 0.8
     /// Default length for a completed activity with no time information at all.
     private static let defaultChainBlockMs: Int64 = 30 * 60_000
-    /// How recent an open block must be for speech to match/close it — today's
-    /// words must never grab a block left running on a previous day.
-    private static let openMatchWindowMs: Int64 = 18 * 3_600_000
-    /// How far back an anchor ("actually X was 4 to 6") may reach for a target.
-    private static let anchorTargetWindowMs: Int64 = 24 * 3_600_000
-    /// Grace before today's start within which planned blocks are still matchable
-    /// (a plan spoken late last night for this morning).
+    /// Late-night grace: before ~6 AM, the voice-edit floor reaches back to
+    /// yesterday evening (same wake period); otherwise voice only touches today.
     private static let plannedMatchGraceMs: Int64 = 6 * 3_600_000
     /// Plausible overnight sleep span for the wake-up anchor.
     private static let minSleepMs: Int64 = 2 * 3_600_000
@@ -47,7 +42,13 @@ public struct TimelineService {
         let dayStart = Clock.millis(
             from: LocalDay(containing: Clock.date(fromMillis: now), in: timeZone).startDate(in: timeZone)
         )
-        var ctx = Context(now: now, dayStartMs: dayStart, userId: userId, checkInId: checkInId,
+        // Voice may only modify TODAY's blocks (previous days are manual-only) —
+        // except in the small hours, when "today" reaches back to yesterday
+        // evening because it's still the same wake period.
+        let smallHours = now < dayStart + Self.plannedMatchGraceMs
+        let matchFloor = smallHours ? dayStart - Self.plannedMatchGraceMs : dayStart
+        var ctx = Context(now: now, dayStartMs: dayStart, matchFloorMs: matchFloor,
+                          userId: userId, checkInId: checkInId,
                           batchId: batchId, resolver: resolver)
 
         // The model sometimes reports one utterance both ways ("woke up at 11" →
@@ -75,6 +76,7 @@ public struct TimelineService {
     private struct Context {
         let now: Int64
         let dayStartMs: Int64    // local-day start of `now` (matching recency windows)
+        let matchFloorMs: Int64  // voice never modifies events starting before this
         let userId: String?
         let checkInId: String?
         let batchId: String
@@ -385,29 +387,29 @@ public struct TimelineService {
         return req
     }
 
-    /// The open block today's speech may match or close: recent only — a block
-    /// left running on a previous day is stale and untouchable from here
-    /// (maintenance closes it), so one check-in can't corrupt old days.
+    /// The open block today's speech may match or close: never one from before
+    /// the voice-edit floor — a block left running on a previous day is stale
+    /// and untouchable from here (maintenance closes it), so one check-in can't
+    /// corrupt old days.
     private func openBlock(_ db: Database, ctx: Context) throws -> Event? {
         try liveEvents(db, ctx: ctx)
             .filter(Column("state") == EventState.confirmed.rawValue)
             .filter(Column("end_at") == nil)
             .filter(Column("start_at") != nil)
-            .filter(Column("start_at") >= ctx.now - Self.openMatchWindowMs)
+            .filter(Column("start_at") >= ctx.matchFloorMs)
             .order(Column("start_at").desc)
             .fetchOne(db)
     }
 
     /// Planned blocks today's speech may confirm/skip: scheduled today, or loose
-    /// placeholders created today (with a small pre-midnight grace for plans
-    /// spoken late last night). Old plans are the rollover's business — never a
-    /// match target, so today's words can't move yesterday's blocks.
+    /// placeholders created since the voice-edit floor. Old plans are the
+    /// rollover's business — never a match target, so today's words can't move
+    /// yesterday's blocks.
     private func plannedBlocks(_ db: Database, ctx: Context) throws -> [Event] {
-        let looseGrace = ctx.dayStartMs - Self.plannedMatchGraceMs
-        return try liveEvents(db, ctx: ctx)
+        try liveEvents(db, ctx: ctx)
             .filter(Column("state") == EventState.planned.rawValue)
             .filter(Column("start_at") >= ctx.dayStartMs
-                || (Column("start_at") == nil && Column("created_at") >= looseGrace))
+                || (Column("start_at") == nil && Column("created_at") >= ctx.matchFloorMs))
             .order(Column("sequence_hint"), Column("start_at"))
             .fetchAll(db)
     }
@@ -467,11 +469,11 @@ public struct TimelineService {
         var pool: [Event] = []
         if let open = try openBlock(db, ctx: ctx) { pool.append(open) }
         pool += try plannedBlocks(db, ctx: ctx)
-        // Corrections only reach the recent past — "class was 4 to 6" must never
-        // retime a block from three days ago.
+        // Corrections only reach today (voice-edit floor) — "class was 4 to 6"
+        // must never retime a block from a previous day.
         pool += try liveEvents(db, ctx: ctx)
             .filter(Column("state") == EventState.confirmed.rawValue)
-            .filter(Column("start_at") >= ctx.now - Self.anchorTargetWindowMs)
+            .filter(Column("start_at") >= ctx.matchFloorMs)
             .order(Column("start_at").desc)
             .limit(5)
             .fetchAll(db)

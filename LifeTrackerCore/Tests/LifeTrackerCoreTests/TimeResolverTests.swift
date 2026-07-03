@@ -68,6 +68,14 @@ struct TimeResolverTests {
         #expect(r.resolveClock("midnight", direction: .past) == dayStart)
     }
 
+    @Test func nowIsAStatedTime() {
+        // "worked until now" → the model reports statedEnd "now".
+        let r = TimeResolver(now: dayStart + h(14), timeZone: tz)
+        #expect(r.resolveClock("now", direction: .past) == dayStart + h(14))
+        #expect(r.resolveClock("until now") == dayStart + h(14))
+        #expect(r.resolveClock("noon") == dayStart + h(12))   // never confused with "now"
+    }
+
     @Test func durations() {
         let r = TimeResolver(now: dayStart, timeZone: tz)
         #expect(r.resolveDuration("2 hours") == h(2))

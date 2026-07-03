@@ -343,6 +343,73 @@ struct TimelineServiceTests {
         #expect(events[1].endAt == base + h(14))
     }
 
+    @Test func sleepWorkCommuteScenario() throws {
+        let (db, svc) = try env()
+        // "Slept at 3, woke up at 9, did work until now, now commuting." at 14:00.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [
+                ParsedBlock(title: "sleep", category: "Sleep", categoryKind: "sleep",
+                            statedStart: "3", statedEnd: "9", temporalState: "completed"),
+                ParsedBlock(title: "work", category: "Work", categoryKind: "work",
+                            statedStart: "9", statedEnd: "now", temporalState: "completed"),
+                ParsedBlock(title: "commute", category: "commute", categoryKind: "transit",
+                            temporalState: "inProgress"),
+            ]),
+            now: base + h(14), timeZone: tz, userId: "u1"
+        )
+        let sleep = try #require(try find(db, title: "sleep"))
+        let work = try #require(try find(db, title: "work"))
+        let commute = try #require(try find(db, title: "commute"))
+        #expect(sleep.startAt == base + h(3))
+        #expect(sleep.endAt == base + h(9))
+        #expect(work.startAt == base + h(9))
+        #expect(work.endAt == base + h(14))         // "until now" honored
+        #expect(commute.startAt == base + h(14))
+        #expect(commute.endAt == nil)               // the open block
+        #expect(try EventRepository(db.dbWriter).plannedBlocks(userId: "u1").isEmpty)
+    }
+
+    @Test func voiceCannotTouchYesterdaysOpenBlockInTheMorning() throws {
+        let (db, svc) = try env()
+        // A block left "in progress" since yesterday 20:00 (maintenance hasn't run).
+        try EventRepository(db.dbWriter).insert(Event(
+            id: newID(), userId: "u1", categoryId: nil, title: "gaming", notes: nil,
+            startAt: base - h(4), endAt: nil, state: EventState.confirmed.rawValue,
+            sequenceHint: nil, confidence: 1.0, source: EventSource.voice.rawValue, sourceRef: nil,
+            originCheckInId: nil, isPinned: false, createdAt: base - h(4), updatedAt: base - h(4), deletedAt: nil
+        ))
+        // 10 AM today: "done with gaming" — must NOT close yesterday's block.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [ParsedBlock(title: "gaming", category: "gaming", categoryKind: "leisure",
+                                               temporalState: "completed", closesOpenBlock: true)]),
+            now: base + h(10), timeZone: tz, userId: "u1"
+        )
+        let events = try db.dbWriter.read {
+            try Event.filter(Column("title") == "gaming").order(Column("created_at")).fetchAll($0)
+        }
+        #expect(events.count == 2)
+        #expect(events[0].endAt == nil)              // yesterday's untouched
+        #expect(events[1].endAt == base + h(10))     // today's compact block instead
+    }
+
+    @Test func lateNightVoiceStillClosesThisEveningsBlock() throws {
+        let (db, svc) = try env()
+        // "Watching a movie" open since 22:00; at 00:30 (small hours of the NEXT
+        // day, same wake period): "done with the movie" closes it.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [ParsedBlock(title: "movie", category: "movie", categoryKind: "leisure",
+                                               statedStart: "10pm", temporalState: "inProgress")]),
+            now: base + h(22), timeZone: tz, userId: "u1"
+        )
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [ParsedBlock(title: "movie", category: "movie", categoryKind: "leisure",
+                                               temporalState: "completed", closesOpenBlock: true)]),
+            now: base + h(24, 30), timeZone: tz, userId: "u1"
+        )
+        let movie = try #require(try find(db, title: "movie"))
+        #expect(movie.endAt == base + h(24, 30))
+    }
+
     @Test func plannedWedgedBetweenPastAndPresentBecomesCompleted() throws {
         let (db, svc) = try env()
         // "Finished lunch, put my laundry in, and now I'm working." — the model

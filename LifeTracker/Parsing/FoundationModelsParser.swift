@@ -45,7 +45,7 @@ struct GenBlock {
     let categoryKind: GenCategoryKind
     @Guide(description: "Start clock time exactly as spoken (e.g. 3:30pm, 15:30, 8). Empty if not spoken.")
     let statedStart: String
-    @Guide(description: "End clock time exactly as spoken. Empty if not spoken.")
+    @Guide(description: "End clock time exactly as spoken, or the word now for 'until now'. Empty if not spoken.")
     let statedEnd: String
     @Guide(description: "Duration exactly as spoken (e.g. 2 hours, 45 minutes). Empty if not spoken.")
     let statedDuration: String
@@ -70,7 +70,7 @@ struct GenAnchor {
 
 struct FoundationModelsParser: TranscriptParser {
     /// Bump when instructions/prompt change so parse_runs stay comparable.
-    static let promptVersion = "v2"
+    static let promptVersion = "v3"
     /// Existing category names injected into the prompt are capped to protect
     /// the model's fixed ~4096-token context window.
     private static let maxInjectedCategories = 40
@@ -116,6 +116,10 @@ struct FoundationModelsParser: TranscriptParser {
     "Just finished showering put my laundry in and now I'm doing work"
     → blocks: shower (completed, closesOpenBlock true), laundry (completed), work (inProgress); anchors: none
 
+    "Slept at 3 woke up at 9 did work until now and now I'm driving to the airport"
+    → blocks: sleep (completed, start 3, end 9), work (completed, start 9, end now), \
+    commute (inProgress); anchors: none
+
     "Just woke up"
     → blocks: none; anchors: wakeUp
 
@@ -144,14 +148,24 @@ struct FoundationModelsParser: TranscriptParser {
         """
     }
 
+    /// Filler the model sometimes promotes to a title ("now", "that") — the
+    /// category name is always a better label than these.
+    private static let junkTitles: Set<String> = [
+        "now", "then", "later", "today", "tonight", "that", "this", "it", "stuff",
+    ]
+
     private static func map(_ g: GenParsedCheckIn) -> ParsedCheckIn {
         func clean(_ s: String) -> String? {
             let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
             return t.isEmpty ? nil : t
         }
+        func title(_ raw: String, category: String) -> String {
+            guard let t = clean(raw), !junkTitles.contains(t.lowercased()) else { return category }
+            return t
+        }
         let blocks = g.blocks.map {
             ParsedBlock(
-                title: clean($0.title) ?? $0.category,
+                title: title($0.title, category: $0.category),
                 category: $0.category, categoryKind: $0.categoryKind.rawValue,
                 statedStart: clean($0.statedStart), statedEnd: clean($0.statedEnd),
                 statedDuration: clean($0.statedDuration),

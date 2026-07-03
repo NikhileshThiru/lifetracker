@@ -166,12 +166,6 @@ struct CaptureView: View {
             }
             .environment(env)
         }
-        .task {
-            // Auto-dismiss keeps the voice flow one-press — but only when nothing
-            // was guessed and the user isn't mid-edit.
-            try? await Task.sleep(for: .seconds(5))
-            if !model.hasGuessedTimes && editingEvent == nil { dismiss() }
-        }
     }
 
     private func editItem(_ item: CaptureModel.AddedItem) {
