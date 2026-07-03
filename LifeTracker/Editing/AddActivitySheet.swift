@@ -8,6 +8,9 @@ struct AddActivitySheet: View {
 
     let initialStart: Int64?
     let initialEnd: Int64?
+    /// Seeds the date pickers (without switching them on) — adding from a past
+    /// day's timeline should default to that day, not today.
+    var defaultDate: Int64? = nil
     var onSaved: () -> Void
 
     enum StatusChoice: String, CaseIterable, Identifiable {
@@ -65,6 +68,10 @@ struct AddActivitySheet: View {
         .task {
             categories = (try? CategoryRepository(env.database.dbWriter).live()) ?? []
             categoryId = categoryId ?? categories.first?.id
+            if initialStart == nil, initialEnd == nil, let d = defaultDate {
+                start = Clock.date(fromMillis: d)
+                end = Clock.date(fromMillis: d)
+            }
             if let s = initialStart { start = Clock.date(fromMillis: s); hasStart = true }
             if let e = initialEnd { end = Clock.date(fromMillis: e); hasEnd = true }
         }

@@ -58,7 +58,8 @@ struct TimelineContent: View {
         }
         .onChange(of: launcher.changeToken) { _, _ in reload() }
         .sheet(isPresented: $showAdd) {
-            AddActivitySheet(initialStart: nil, initialEnd: nil) { reload() }.environment(env)
+            AddActivitySheet(initialStart: nil, initialEnd: nil, defaultDate: addDefaultDate) { reload() }
+                .environment(env)
         }
         .sheet(item: $editingEvent) { event in
             EditEventSheet(event: event) { reload() }.environment(env)
@@ -79,6 +80,14 @@ struct TimelineContent: View {
 
     private func reload() {
         model.load(database: env.database, day: day, now: env.currentTime(), tz: env.timeZone)
+    }
+
+    /// Manual add on a past/future day defaults its pickers to that day's noon;
+    /// on today it keeps "now".
+    private var addDefaultDate: Int64? {
+        let today = LocalDay(containing: Clock.date(fromMillis: env.currentTime()), in: env.timeZone)
+        guard day != today else { return nil }
+        return day.bounds(in: env.timeZone).startMs + 12 * 3_600_000
     }
 
     /// Commits a drag-edge retime (5-min-snapped in the row) as one revision.
