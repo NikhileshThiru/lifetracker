@@ -120,19 +120,16 @@ private struct EventRow: View {
     // MARK: Drag-edge editing
 
     private func dragHandle(_ edge: DragEdge) -> some View {
-        Rectangle()
-            .fill(.clear)
-            .frame(height: 16)
-            .frame(maxWidth: .infinity)
-            .overlay(alignment: edge == .start ? .top : .bottom) {
-                Capsule()
-                    .fill(Theme.textSecondary.opacity(dragEdge == edge ? 0.9 : 0.25))
-                    .frame(width: 28, height: 3)
-                    .padding(edge == .start ? .top : .bottom, 4)
-            }
+        // Hit area is ONLY the small centered grip — a full-width zone on every
+        // card's edges fights the ScrollView and breaks scrolling on full days.
+        Capsule()
+            .fill(Theme.textSecondary.opacity(dragEdge == edge ? 0.9 : 0.25))
+            .frame(width: 28, height: 3)
+            .padding(edge == .start ? .top : .bottom, 5)
+            .frame(width: 64, height: 20)
             .contentShape(Rectangle())
             .gesture(
-                LongPressGesture(minimumDuration: 0.25)
+                LongPressGesture(minimumDuration: 0.25, maximumDistance: 12)
                     .sequenced(before: DragGesture(minimumDistance: 0))
                     .onChanged { value in
                         guard case .second(true, let drag) = value else { return }

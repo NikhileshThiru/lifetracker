@@ -113,6 +113,9 @@ struct FoundationModelsParser: TranscriptParser {
     "Done with the workout finished at 7 now starting dinner"
     → blocks: workout (completed, end 7, closesOpenBlock true), dinner (inProgress); anchors: none
 
+    "Just finished showering put my laundry in and now I'm doing work"
+    → blocks: shower (completed, closesOpenBlock true), laundry (completed), work (inProgress); anchors: none
+
     "Just woke up"
     → blocks: none; anchors: wakeUp
 

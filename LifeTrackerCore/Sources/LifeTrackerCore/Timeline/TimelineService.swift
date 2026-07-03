@@ -81,6 +81,11 @@ public struct TimelineService {
         let resolver: TimeResolver
         var nextSeq = 1
         var affected: [String] = []
+        /// Latest end confirmed during this reconcile's matching pass — chain
+        /// blocks with fully synthesized times get squeezed after it ("finished
+        /// shower, did laundry, working now" → laundry is a sliver, not 30 min
+        /// underneath the shower).
+        var floorMs: Int64?
     }
 
     // MARK: - Blocks
@@ -102,8 +107,19 @@ public struct TimelineService {
         var completed: [ParsedBlock] = []
         var inProgress: [ParsedBlock] = []
         var planned: [ParsedBlock] = []
-        for b in blocks {
-            switch TemporalState.parse(b.temporalState) {
+        let states = blocks.map { TemporalState.parse($0.temporalState) }
+        for (i, b) in blocks.enumerated() {
+            var state = states[i]
+            // Chronological narration: an untimed "planned" wedged between things
+            // that already happened ("finished shower, put laundry in, working
+            // now") was done, not planned — the model over-plans quick past
+            // actions. A leading or trailing planned block is left alone.
+            if state == .planned, b.statedStart == nil, b.statedEnd == nil,
+               states[..<i].contains(where: { $0 != .planned }),
+               states[(i + 1)...].contains(where: { $0 != .planned }) {
+                state = .completed
+            }
+            switch state {
             case .completed: completed.append(b)
             case .inProgress: inProgress.append(b)
             case .planned: planned.append(b)
@@ -140,6 +156,7 @@ public struct TimelineService {
                 ev.updatedAt = ctx.now
                 try ev.update(db)
                 try record(changedTimes ? .retime : .confirm, before: before, after: Self.encode(ev), eventId: ev.id, db: db, ctx: &ctx)
+                ctx.floorMs = max(ctx.floorMs ?? resolvedEnd, resolvedEnd)
             } else {
                 pending.append(PendingCompleted(block: block, categoryId: categoryId, start: start, end: end, duration: duration))
             }
@@ -221,7 +238,13 @@ public struct TimelineService {
                 inferred = (p.duration == nil)
             } else {
                 end = min(cursor, ctx.now)
-                start = end - (p.duration ?? Self.defaultChainBlockMs)
+                var s = end - (p.duration ?? Self.defaultChainBlockMs)
+                // Squeeze behind whatever this same check-in just confirmed:
+                // a quick untimed task jammed against "now" becomes a sliver.
+                if let floor = ctx.floorMs, s < floor {
+                    s = min(floor, end - 60_000)
+                }
+                start = s
                 inferred = true
             }
             if end <= start { end = start + 60_000 }   // contradictory stated times → 1 min, never 0

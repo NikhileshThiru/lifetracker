@@ -343,6 +343,71 @@ struct TimelineServiceTests {
         #expect(events[1].endAt == base + h(14))
     }
 
+    @Test func plannedWedgedBetweenPastAndPresentBecomesCompleted() throws {
+        let (db, svc) = try env()
+        // "Finished lunch, put my laundry in, and now I'm working." — the model
+        // sometimes misfiles the quick middle action as "planned".
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [
+                ParsedBlock(title: "lunch", category: "lunch", categoryKind: "meal", temporalState: "completed"),
+                ParsedBlock(title: "laundry", category: "laundry", categoryKind: "chore", temporalState: "planned"),
+                ParsedBlock(title: "work", category: "Work", categoryKind: "work", temporalState: "inProgress"),
+            ]),
+            now: base + h(14), timeZone: tz, userId: "u1"
+        )
+        let laundry = try #require(try find(db, title: "laundry"))
+        #expect(laundry.state == EventState.confirmed.rawValue)   // reclassified
+        #expect(laundry.endAt == base + h(14))
+        let work = try #require(try find(db, title: "work"))
+        #expect(work.startAt == base + h(14))
+        #expect(work.endAt == nil)
+        #expect(try EventRepository(db.dbWriter).plannedBlocks(userId: "u1").isEmpty)
+    }
+
+    @Test func trailingPlannedStaysPlanned() throws {
+        let (db, svc) = try env()
+        // "Finished lunch, then I'll hit the gym." — trailing plan must survive.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [
+                ParsedBlock(title: "lunch", category: "lunch", categoryKind: "meal", temporalState: "completed"),
+                ParsedBlock(title: "gym", category: "gym", categoryKind: "exercise", temporalState: "planned"),
+            ]),
+            now: base + h(13), timeZone: tz, userId: "u1"
+        )
+        let gym = try #require(try find(db, title: "gym"))
+        #expect(gym.state == EventState.planned.rawValue)
+    }
+
+    @Test func quickTaskSqueezedAgainstNowBecomesASliver() throws {
+        let (db, svc) = try env()
+        // Shower has been the open block since 13:40.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [ParsedBlock(title: "shower", category: "shower", categoryKind: "chore",
+                                               statedStart: "1:40pm", temporalState: "inProgress")]),
+            now: base + h(13, 40), timeZone: tz, userId: "u1"
+        )
+        // "Just finished showering, put my laundry in, now doing work." at 14:00.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [
+                ParsedBlock(title: "shower", category: "shower", categoryKind: "chore",
+                            temporalState: "completed", closesOpenBlock: true),
+                ParsedBlock(title: "laundry", category: "laundry", categoryKind: "chore",
+                            temporalState: "completed"),
+                ParsedBlock(title: "work", category: "Work", categoryKind: "work",
+                            temporalState: "inProgress"),
+            ]),
+            now: base + h(14), timeZone: tz, userId: "u1"
+        )
+        let shower = try #require(try find(db, title: "shower"))
+        let laundry = try #require(try find(db, title: "laundry"))
+        let work = try #require(try find(db, title: "work"))
+        #expect(shower.endAt == base + h(14))              // closed at now
+        #expect(laundry.endAt == base + h(14))
+        #expect(laundry.startAt == base + h(13, 59))       // 1-min sliver, not 30 min under the shower
+        #expect(work.startAt == base + h(14))
+        #expect(work.endAt == nil)
+    }
+
     @Test func wakeUpAnchorSkippedWhenSleepBlockPresent() throws {
         let (db, svc) = try env()
         try svc.reconcile(
