@@ -45,7 +45,7 @@ struct GenBlock {
     let categoryKind: GenCategoryKind
     @Guide(description: "Start clock time exactly as spoken (e.g. 3:30pm, 15:30, 8). Empty if not spoken.")
     let statedStart: String
-    @Guide(description: "End clock time exactly as spoken, or the word now for 'until now'. Empty if not spoken.")
+    @Guide(description: "End clock time exactly as spoken, or the word now for 'until now'. Empty if not spoken — never repeat the start time here.")
     let statedEnd: String
     @Guide(description: "Duration exactly as spoken (e.g. 2 hours, 45 minutes). Empty if not spoken.")
     let statedDuration: String
@@ -70,7 +70,7 @@ struct GenAnchor {
 
 struct FoundationModelsParser: TranscriptParser {
     /// Bump when instructions/prompt change so parse_runs stay comparable.
-    static let promptVersion = "v4"
+    static let promptVersion = "v5"
     /// Existing category names injected into the prompt are capped to protect
     /// the model's fixed ~4096-token context window.
     private static let maxInjectedCategories = 40
@@ -123,6 +123,10 @@ struct FoundationModelsParser: TranscriptParser {
     "Worked from 9 to 10 and now I'm traveling"
     → blocks: work (completed, start 9, end 10), travel (inProgress); anchors: none. \
     Titles are the bare activity name: "work", never "work from 9 to 10"; "travel", never "now traveling".
+
+    "Um so basically I like just finished the workout and now I'm gonna go eat"
+    → blocks: workout (completed, closesOpenBlock true), eat (planned); anchors: none. \
+    Filler words (um, like, so, basically) are never activities and never part of a title.
 
     "Just woke up"
     → blocks: none; anchors: wakeUp

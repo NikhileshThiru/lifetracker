@@ -175,7 +175,14 @@ public struct TimelineService {
 
         if !pending.isEmpty {
             let wEnd = pending.last?.end ?? (inProgressStatedStarts.first ?? nil) ?? ctx.now
-            try layOutChain(pending, wEnd: wEnd, closeOpen: wantsOpenClosed, db: db, ctx: &ctx)
+            // The chain's end is a real narration boundary (not just "whenever
+            // this was said") when something explicitly bounds it: a stated end,
+            // a stated in-progress start, or an in-progress activity running now.
+            let wEndTrusted = pending.last?.end != nil
+                || (inProgressStatedStarts.first ?? nil) != nil
+                || !inProgress.isEmpty
+            try layOutChain(pending, wEnd: wEnd, wEndTrusted: wEndTrusted,
+                            closeOpen: wantsOpenClosed, db: db, ctx: &ctx)
         }
 
         // In-progress → becomes the new open block; close any prior open block
@@ -240,52 +247,106 @@ public struct TimelineService {
     /// never stretch to fill hours-long quiet spans, never reach back into a
     /// previous day on their own, and can't produce zero-length artifacts.
     /// Unclaimed time stays a gap, which is what gaps are for.
-    private func layOutChain(_ pending: [PendingCompleted], wEnd: Int64, closeOpen: Bool, db: Database, ctx: inout Context) throws {
-        var placed: [(p: PendingCompleted, start: Int64, end: Int64, inferred: Bool)] = []
-        var cursor = wEnd   // a synthesized end may never pass the next block's start
-        for p in pending.reversed() {
-            let start: Int64
-            var end: Int64
-            let inferred: Bool
-            if let s = p.start {
-                start = s
-                end = p.end ?? (s + (p.duration ?? Self.defaultChainBlockMs))
-                inferred = (p.end == nil && p.duration == nil)
-            } else if let e = p.end {
-                end = e
-                start = e - (p.duration ?? Self.defaultChainBlockMs)
-                inferred = (p.duration == nil)
-            } else {
-                end = min(cursor, ctx.now)
-                var s = end - (p.duration ?? Self.defaultChainBlockMs)
-                // Squeeze behind whatever this same check-in just confirmed:
-                // a quick untimed task jammed against "now" becomes a sliver.
-                if let floor = ctx.floorMs, s < floor {
-                    s = min(floor, end - 60_000)
-                }
-                start = s
-                inferred = true
+    private func layOutChain(_ pending: [PendingCompleted], wEnd: Int64, wEndTrusted: Bool, closeOpen: Bool, db: Database, ctx: inout Context) throws {
+        let n = pending.count
+        // One check-in narrates a contiguous stretch — "x until y, y until z" —
+        // so blocks share boundaries. Only the outer edges need care: the chain
+        // never invents time on a previous day, and a lone unbounded block stays
+        // compact instead of swallowing hours.
+        var bounds = [Int64?](repeating: nil, count: n + 1)
+        var synthetic = [Bool](repeating: false, count: n + 1)
+
+        // 1. Stated boundaries (an end at/before its own start is a model echo — ignored).
+        bounds[0] = pending[0].start
+        for i in 0..<n {
+            let statedEnd = pending[i].end.flatMap { e in
+                (pending[i].start.map { e > $0 } ?? true) ? e : nil
             }
-            if end <= start { end = start + 60_000 }   // contradictory stated times → 1 min, never 0
-            placed.append((p, start, end, inferred))
-            cursor = min(cursor, start)
+            if let statedEnd { bounds[i + 1] = statedEnd }
+            else if i + 1 < n, let s = pending[i + 1].start { bounds[i + 1] = s }
         }
-        placed.reverse()
+
+        // 2. Stated durations off known boundaries (before and after defaulting
+        //    the tail, so "from 2 for three hours" ends at 5, not at now).
+        func propagateDurations() {
+            for i in 0..<n where bounds[i + 1] == nil {
+                if let b = bounds[i], let d = pending[i].duration { bounds[i + 1] = b + d }
+            }
+            for i in (0..<n).reversed() where bounds[i] == nil {
+                if let b = bounds[i + 1], let d = pending[i].duration { bounds[i] = b - d }
+            }
+        }
+        propagateDurations()
+        // 3. Tail: a multi-block narration (or one bounded by something stated or
+        //    currently running) runs through wEnd; a lone stated-start block with
+        //    no boundary stays compact ("had lunch at noon" said at 8 PM).
+        if bounds[n] == nil {
+            if n > 1 || wEndTrusted || pending[0].start == nil {
+                bounds[n] = min(wEnd, ctx.now)
+            } else {
+                bounds[n] = pending[0].start! + Self.defaultChainBlockMs
+                synthetic[n] = true
+            }
+        }
+        propagateDurations()
+
+        // 4. Opening: stated, else where today's timeline left off (recent, and
+        //    never past the voice-edit floor into a previous day).
+        if bounds[0] == nil,
+           let lastEnd = try lastConfirmedEnd(db, before: bounds[n]!, ctx: ctx),
+           lastEnd >= ctx.matchFloorMs, lastEnd < bounds[n]!,
+           bounds[n]! - lastEnd <= Self.narrationContinueWindowMs {
+            bounds[0] = lastEnd
+            synthetic[0] = true
+        }
+
+        // 5. Remaining unknowns: even split between known neighbours (contiguous
+        //    narration); a leading run with no anchor defaults 30 min per block.
+        var i = 0
+        while i <= n {
+            guard bounds[i] == nil else { i += 1; continue }
+            var k = i
+            while k <= n, bounds[k] == nil { k += 1 }   // next known bound (bounds[n] is set)
+            if i == 0 {
+                for t in stride(from: k - 1, through: 0, by: -1) {
+                    bounds[t] = bounds[t + 1]! - (pending[t].duration ?? Self.defaultChainBlockMs)
+                    synthetic[t] = true
+                }
+            } else {
+                let a = bounds[i - 1]!, b = bounds[k]!
+                let steps = Int64(k - i + 1)
+                let span = max(0, b - a)
+                for t in i..<k {
+                    bounds[t] = a + span * Int64(t - i + 1) / steps
+                    synthetic[t] = true
+                }
+            }
+            i = k
+        }
+
+        // 6. Squeeze a synthesized opening behind whatever this same check-in
+        //    just confirmed: a quick untimed task against "now" becomes a sliver.
+        if synthetic[0], let floor = ctx.floorMs, bounds[0]! < floor {
+            bounds[0] = min(floor, bounds[n]! - 60_000)
+        }
+        // Contradictory stated times: keep strictly increasing, ≥ 1 minute each.
+        for t in 1...n where bounds[t]! <= bounds[t - 1]! {
+            bounds[t] = bounds[t - 1]! + 60_000
+        }
 
         // A linear timeline can't have something "still running" underneath what
         // was just recounted — close the (recent) open block where the chain begins.
-        if let chainStart = placed.first?.start, closeOpen || chainStart < ctx.now {
-            try closeOpenBlockIfAny(db: db, at: chainStart, ctx: &ctx)
+        if closeOpen || bounds[0]! < ctx.now {
+            try closeOpenBlockIfAny(db: db, at: bounds[0]!, ctx: &ctx)
         }
 
-        for item in placed {
-            try insertNew(db: db, ctx: &ctx, categoryId: item.p.categoryId, title: item.p.block.title,
-                          start: item.start, end: item.end, state: .confirmed,
-                          confidence: item.inferred ? Self.inferredConfidence : 1.0, sequenceHint: nil)
+        for (idx, p) in pending.enumerated() {
+            let inferred = synthetic[idx] || synthetic[idx + 1]
+            try insertNew(db: db, ctx: &ctx, categoryId: p.categoryId, title: p.block.title,
+                          start: bounds[idx]!, end: bounds[idx + 1]!, state: .confirmed,
+                          confidence: inferred ? Self.inferredConfidence : 1.0, sequenceHint: nil)
         }
-        if let last = placed.last {
-            ctx.floorMs = max(ctx.floorMs ?? last.end, last.end)   // narration continues from here
-        }
+        ctx.floorMs = max(ctx.floorMs ?? bounds[n]!, bounds[n]!)   // narration continues from here
     }
 
     // MARK: - Anchors

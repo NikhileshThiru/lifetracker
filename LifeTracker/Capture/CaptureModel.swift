@@ -155,7 +155,8 @@ final class CaptureModel {
         resultItems = Self.items(for: batchId, env: env)
     }
 
-    /// The blocks this batch touched, oldest revision first (≈ spoken order).
+    /// The blocks this batch touched, in day order (earliest start first, loose
+    /// blocks last) — the card should read like the timeline will.
     private static func items(for batchId: String, env: AppEnvironment) -> [AddedItem] {
         let revs = (try? RevisionRepository(env.database.dbWriter).byBatch(batchId)) ?? []
         var catMap: [String: LifeTrackerCore.Category] = [:]
@@ -163,8 +164,8 @@ final class CaptureModel {
         let events = EventRepository(env.database.dbWriter)
 
         var seen = Set<String>()
-        var items: [AddedItem] = []
-        for rev in revs.reversed() {
+        var found: [(item: AddedItem, sortKey: Int64)] = []
+        for rev in revs {
             guard !seen.contains(rev.eventId),
                   let ev = (try? events.find(id: rev.eventId)) ?? nil else { continue }
             seen.insert(rev.eventId)
@@ -172,15 +173,18 @@ final class CaptureModel {
             let guessed = ev.deletedAt == nil
                 && ev.state == EventState.confirmed.rawValue
                 && ev.confidence < 1.0
-            items.append(AddedItem(
-                id: ev.id,
-                title: ev.title ?? cat?.name ?? "Untitled",
-                colorHex: cat?.colorHex,
-                detail: detail(for: ev, tz: env.timeZone),
-                needsTime: guessed
+            found.append((
+                AddedItem(
+                    id: ev.id,
+                    title: ev.title ?? cat?.name ?? "Untitled",
+                    colorHex: cat?.colorHex,
+                    detail: detail(for: ev, tz: env.timeZone),
+                    needsTime: guessed
+                ),
+                ev.startAt ?? Int64.max
             ))
         }
-        return items
+        return found.sorted { $0.sortKey < $1.sortKey }.map(\.item)
     }
 
     private static func detail(for ev: Event, tz: TimeZone) -> String {

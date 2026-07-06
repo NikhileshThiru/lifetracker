@@ -188,9 +188,10 @@ struct TimelineServiceTests {
 
     // MARK: - Multi-activity chains (the core "several things since I last checked in" case)
 
-    @Test func multipleCompletedBlocksChainCompactly() throws {
+    @Test func multipleCompletedBlocksNarrateContiguously() throws {
         let (db, svc) = try env()
-        // "Had breakfast at 8, then went to the gym, then showered." said at 11.
+        // "Had breakfast at 8, then went to the gym, then showered." said at 11 —
+        // one check-in narrates a contiguous stretch: x until y, y until z, up to now.
         try svc.reconcile(
             ParsedCheckIn(blocks: [
                 ParsedBlock(title: "breakfast", category: "breakfast", categoryKind: "meal",
@@ -205,14 +206,12 @@ struct TimelineServiceTests {
         let breakfast = try #require(try find(db, title: "breakfast"))
         let gym = try #require(try find(db, title: "gym"))
         let shower = try #require(try find(db, title: "shower"))
-        // Stated time honored; untimed blocks get modest defaults walking back
-        // from now — the unclaimed mid-morning stays an honest gap.
         #expect(breakfast.startAt == base + h(8))
-        #expect(breakfast.endAt == base + h(8, 30))
-        #expect(gym.startAt == base + h(10))
-        #expect(gym.endAt == base + h(10, 30))
-        #expect(shower.startAt == base + h(10, 30))
-        #expect(shower.endAt == base + h(11))
+        #expect(breakfast.endAt == base + h(9))      // even split — no gaps
+        #expect(gym.startAt == base + h(9))
+        #expect(gym.endAt == base + h(10))
+        #expect(shower.startAt == base + h(10))
+        #expect(shower.endAt == base + h(11))        // through "now"
         // Inferred boundaries are marked lower-confidence for the UI.
         #expect(gym.confidence < 1.0)
     }
@@ -380,6 +379,65 @@ struct TimelineServiceTests {
         )
         let gaming = try #require(try find(db, title: "gaming"))
         #expect(gaming.startAt == base + h(20))
+    }
+
+    @Test func statedStartsChainToTheNextStatedBoundary() throws {
+        let (db, svc) = try env()
+        // "Slept at 4, was scrolling at 1, started work at 2:30." said at 14:39.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [
+                ParsedBlock(title: "sleep", category: "Sleep", categoryKind: "sleep",
+                            statedStart: "4", temporalState: "completed"),
+                ParsedBlock(title: "scrolling", category: "scrolling", categoryKind: "leisure",
+                            statedStart: "1", temporalState: "completed"),
+                ParsedBlock(title: "work", category: "Work", categoryKind: "work",
+                            statedStart: "2:30", temporalState: "inProgress"),
+            ]),
+            now: base + h(14, 39), timeZone: tz, userId: "u1"
+        )
+        let sleep = try #require(try find(db, title: "sleep"))
+        let scrolling = try #require(try find(db, title: "scrolling"))
+        let work = try #require(try find(db, title: "work"))
+        #expect(sleep.startAt == base + h(4))
+        #expect(sleep.endAt == base + h(13))         // runs until scrolling's stated start
+        #expect(scrolling.startAt == base + h(13))
+        #expect(scrolling.endAt == base + h(14, 30)) // runs until work's stated start
+        #expect(work.startAt == base + h(14, 30))
+        #expect(work.endAt == nil)
+    }
+
+    @Test func echoedEndEqualToStartIsIgnored() throws {
+        let (db, svc) = try env()
+        // The model sometimes copies the start into the end ("4" → end "4") —
+        // that must not produce a 1-minute block when a real boundary follows.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [
+                ParsedBlock(title: "sleep", category: "Sleep", categoryKind: "sleep",
+                            statedStart: "4", statedEnd: "4", temporalState: "completed"),
+                ParsedBlock(title: "scrolling", category: "scrolling", categoryKind: "leisure",
+                            statedStart: "1", temporalState: "completed"),
+                ParsedBlock(title: "work", category: "Work", categoryKind: "work",
+                            statedStart: "2:30", temporalState: "inProgress"),
+            ]),
+            now: base + h(14, 39), timeZone: tz, userId: "u1"
+        )
+        let sleep = try #require(try find(db, title: "sleep"))
+        #expect(sleep.startAt == base + h(4))
+        #expect(sleep.endAt == base + h(13))         // echo discarded, chained instead
+    }
+
+    @Test func statedStartWithoutTrustedBoundaryStaysCompact() throws {
+        let (db, svc) = try env()
+        // "Had lunch at noon." said at 20:00 — no next boundary, no in-progress:
+        // lunch must NOT stretch to now.
+        try svc.reconcile(
+            ParsedCheckIn(blocks: [ParsedBlock(title: "lunch", category: "lunch", categoryKind: "meal",
+                                               statedStart: "noon", temporalState: "completed")]),
+            now: base + h(20), timeZone: tz, userId: "u1"
+        )
+        let lunch = try #require(try find(db, title: "lunch"))
+        #expect(lunch.startAt == base + h(12))
+        #expect(lunch.endAt == base + h(12, 30))     // modest default, honest gap after
     }
 
     @Test func sleepWorkCommuteScenario() throws {
