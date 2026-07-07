@@ -22,6 +22,9 @@ public struct TimelineService {
     static let inferredConfidence = 0.8
     /// Default length for a completed activity with no time information at all.
     private static let defaultChainBlockMs: Int64 = 30 * 60_000
+    /// Below this, a fully-guessed span is a meaningless sliver — the block is
+    /// handed to the user untimed instead of being invented.
+    private static let minSensibleSpanMs: Int64 = 5 * 60_000
     /// Late-night grace: before ~6 AM, the voice-edit floor reaches back to
     /// yesterday evening (same wake period); otherwise voice only touches today.
     private static let plannedMatchGraceMs: Int64 = 6 * 3_600_000
@@ -341,6 +344,18 @@ public struct TimelineService {
         }
 
         for (idx, p) in pending.enumerated() {
+            let span = bounds[idx + 1]! - bounds[idx]!
+            let nothingStated = p.start == nil && p.end == nil && p.duration == nil
+            if nothingStated, span < Self.minSensibleSpanMs {
+                // No information and no room — a one-minute guess helps nobody.
+                // Hand it over as a loose block to be timed by hand.
+                let seq = ctx.nextSeq
+                ctx.nextSeq += 1
+                try insertNew(db: db, ctx: &ctx, categoryId: p.categoryId, title: p.block.title,
+                              start: nil, end: nil, state: .planned,
+                              confidence: Self.plannedConfidence, sequenceHint: seq)
+                continue
+            }
             let inferred = synthetic[idx] || synthetic[idx + 1]
             try insertNew(db: db, ctx: &ctx, categoryId: p.categoryId, title: p.block.title,
                           start: bounds[idx]!, end: bounds[idx + 1]!, state: .confirmed,

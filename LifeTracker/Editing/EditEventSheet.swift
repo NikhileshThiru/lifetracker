@@ -121,6 +121,11 @@ struct EditEventSheet: View {
         let startMs = hasStart ? Clock.millis(from: start) : nil
         let endMs = hasEnd ? Clock.millis(from: end) : nil
         try? service.retime(eventId: event.id, start: startMs, end: endMs, now: now)
+        // Giving a planned block times that already ended is backfilling reality —
+        // confirm in the same save, no separate "mark as done" needed.
+        if isPlanned, let s = startMs, let e = endMs, e > s, e <= now {
+            try? service.confirm(eventId: event.id, now: now)
+        }
         onSaved()
         dismiss()
     }

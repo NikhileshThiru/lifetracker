@@ -542,7 +542,7 @@ struct TimelineServiceTests {
         #expect(gym.state == EventState.planned.rawValue)
     }
 
-    @Test func quickTaskSqueezedAgainstNowBecomesASliver() throws {
+    @Test func quickTaskWithNoRoomBecomesALooseBlockNotASliver() throws {
         let (db, svc) = try env()
         // Shower has been the open block since 13:40.
         try svc.reconcile(
@@ -551,6 +551,8 @@ struct TimelineServiceTests {
             now: base + h(13, 40), timeZone: tz, userId: "u1"
         )
         // "Just finished showering, put my laundry in, now doing work." at 14:00.
+        // Laundry has no stated times and no room — a 1-minute guess is useless,
+        // so it lands as a loose block for the user to time by hand.
         try svc.reconcile(
             ParsedCheckIn(blocks: [
                 ParsedBlock(title: "shower", category: "shower", categoryKind: "chore",
@@ -566,8 +568,9 @@ struct TimelineServiceTests {
         let laundry = try #require(try find(db, title: "laundry"))
         let work = try #require(try find(db, title: "work"))
         #expect(shower.endAt == base + h(14))              // closed at now
-        #expect(laundry.endAt == base + h(14))
-        #expect(laundry.startAt == base + h(13, 59))       // 1-min sliver, not 30 min under the shower
+        #expect(laundry.state == EventState.planned.rawValue)
+        #expect(laundry.startAt == nil)                    // loose — user sets the time
+        #expect(laundry.sequenceHint != nil)
         #expect(work.startAt == base + h(14))
         #expect(work.endAt == nil)
     }
